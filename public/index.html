@@ -46,6 +46,14 @@ const $ = id => document.getElementById(id);
 const fmt = (n, digits=4) => Number(n||0).toLocaleString('zh-TW',{maximumFractionDigits:digits});
 const money = n => fmt(n, 4);
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function describeEvent(x){
+ const direct=String(x.message||x.state||x.error||'').trim();
+ if(direct)return direct;
+ if(x.entry){const e=x.entry;return [e.category,e.pair&&String(e.pair).toUpperCase(),e.action,e.orderId&&('訂單 '+e.orderId),e.result].filter(Boolean).join(' · ')||'交易紀錄已更新';}
+ const details={...x};delete details.id;delete details.time;delete details.type;
+ const text=JSON.stringify(details);
+ return text&&text!=='{}'?text.slice(0,240):'事件已記錄';
+}
 async function api(url, method='GET'){const r=await fetch(url,{method,headers:{'Content-Type':'application/json'}});const d=await r.json();if(!r.ok||d.ok===false)throw new Error(JSON.stringify(d.error||d));return d;}
 async function refreshBalance(){try{await api('/api/balance','POST');await load();toast('餘額已更新');}catch(e){toast(e.message)}}
 function toast(s){console.log(s);alert(s)}
@@ -92,7 +100,7 @@ function render(){
  initOrderPairSelect();
  if ($('dailyBody')) $('dailyBody').innerHTML=(state.daily||[]).length?(state.daily||[]).map(x=>`<tr><td>${esc(x.date)}</td><td>${x.fills}</td><td>${x.signals}</td><td>${x.submitted}</td><td>${x.failed}</td><td>${money(x.estimatedGross)}</td><td>${money(x.estimatedFees)}</td><td class="${x.estimatedNet>=0?'green':'red'}">${money(x.estimatedNet)}</td></tr>`).join(''):'<tr><td colspan="8" class="empty">尚無資料</td></tr>';
  const journalSource=(state.journal||[]); const tradeOrderKeys=new Set(journalSource.filter(x=>x.category==='filled_trade'&&x.orderId!=null).map(x=>String(x.pair||'').toLowerCase()+'|'+String(x.orderId))); const cutoff18=Date.parse('2026-10-17T16:00:00.000Z'); const tradeTimeMs=(value)=>{if(value==null||value==='')return 0;if(typeof value==='number'||(/^\d{10,13}$/.test(String(value)))){const n=Number(value);return Number.isFinite(n)?(n<1e12?n*1000:n):0;}const n=Date.parse(value);return Number.isFinite(n)?n:0;}; const filledRows=journalSource.filter(x=>(x.category==='filled_trade'||(x.category==='filled_order'&&!tradeOrderKeys.has(String(x.pair||'').toLowerCase()+'|'+String(x.orderId||'')))) && tradeTimeMs(x.exchangeTime||x.time)>=cutoff18).sort((a,b)=>tradeTimeMs(b.exchangeTime||b.time)-tradeTimeMs(a.exchangeTime||a.time)); if ($('journalBody')) $('journalBody').innerHTML=filledRows.length?filledRows.slice(0,100).map(x=>{const feeReported=Number(x.fee)>0;const feeText=feeReported?fmt(x.fee,8)+' '+esc(x.feeCurrency||''):(x.category==='filled_order'?'待同步成交明細':'—');return `<tr><td>${esc(new Date(x.exchangeTime||x.time).toLocaleString())}</td><td>${esc(x.category==='filled_order'?'filled_order（待補成交明細）':x.category)}</td><td>${esc((x.pair||'').toUpperCase())}</td><td>${esc(x.action||'')}</td><td>${x.price==null?'—':fmt(x.price,8)}</td><td>${x.amount==null?'—':fmt(x.amount,8)}</td><td>${feeText}</td><td>${x.feeBitoTwdPrice==null?'—': 'NT$ '+fmt(x.feeBitoTwdPrice,8)+'<br><small class="muted">'+esc(x.feePriceTime||'')+'</small>'}</td><td>${x.feeTwdCost==null?'—': 'NT$ '+fmt(x.feeTwdCost,6)}</td><td>${esc(x.result||'')}</td></tr>`}).join(''):'<tr><td colspan="10" class="empty">尚無成交紀錄</td></tr>';  
- if ($('events')) { const visibleEvents=(state.events||[]).filter(x=>!['journal','balances','status'].includes(String(x.type||'').toLowerCase()) && String(x.message||x.state||x.error||'').trim()!==''); $('events').innerHTML=visibleEvents.slice(0,60).map(x=>`<div class="event"><time>${esc(new Date(x.time).toLocaleTimeString())}</time><p><span class="tag">${esc(x.type)}</span>${esc(x.message||x.state||x.error||'')}</p></div>`).join('')||'<div class="empty">等待事件…</div>'; }
+ if ($('events')) { $('events').innerHTML=(state.events||[]).slice(0,100).map(x=>`<div class="event"><time>${esc(new Date(x.time).toLocaleString())}</time><p><span class="tag">${esc(x.type||'event')}</span>${esc(describeEvent(x))}</p></div>`).join('')||'<div class="empty">等待事件…</div>'; }
 }
 
 
