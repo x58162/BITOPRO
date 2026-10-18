@@ -18,6 +18,8 @@ const LIVE_TRADING = String(process.env.LIVE_TRADING || 'false').toLowerCase() =
 const FEE_RATE = Math.max(0, Number(process.env.FEE_RATE || 0.0001));
 const DATA_DIR = path.join(__dirname, 'data');
 const JOURNAL = path.join(DATA_DIR, 'journal.json');
+const EVENTS_FILE = path.join(DATA_DIR, 'events.json');
+const EVENT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const DAILY_STATS_FILE = path.join(DATA_DIR, 'daily-stats.json');
 const SPREADS_FILE = path.join(DATA_DIR, 'spreads.json');
 const PAIRS_FILE = path.join(DATA_DIR, 'pairs.json');
@@ -60,7 +62,18 @@ let status = { state: 'stopped', message: '尚未啟動', since: null, lastError
 let balances = [];
 let assetValuation = { totalTwd: null, pricedCurrencies: [], unpricedCurrencies: [], updatedAt: null };
 let clients = new Set();
-let events = [];
+function loadEvents() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(EVENTS_FILE, 'utf8'));
+    return Array.isArray(parsed) ? parsed.filter(item => item && item.time && Date.parse(item.time) >= Date.now() - EVENT_RETENTION_MS) : [];
+  } catch { return []; }
+}
+let events = loadEvents();
+function persistEvents() {
+  const cutoff = Date.now() - EVENT_RETENTION_MS;
+  events = events.filter(item => item && Date.parse(item.time) >= cutoff);
+  fs.writeFileSync(EVENTS_FILE, JSON.stringify(events, null, 2), 'utf8');
+}
 let orderBusy = false;
 let bitoTwdPrice = null;
 let bitoTwdPriceAt = null;
@@ -80,7 +93,7 @@ function persist() {
 function emit(type, data = {}) {
   const item = { id: Date.now() + Math.random(), time: new Date().toISOString(), type, ...data };
   events.unshift(item);
-  events = events.slice(0, 300);
+  try { persistEvents(); } catch (err) { console.error('保存即時事件失敗：', err.message); }
   for (const client of clients) {
     if (client.readyState === 1) client.send(JSON.stringify({ kind: 'event', item }));
   }
