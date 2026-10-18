@@ -74,6 +74,7 @@ function persistEvents() {
   events = events.filter(item => item && Date.parse(item.time) >= cutoff);
   fs.writeFileSync(EVENTS_FILE, JSON.stringify(events, null, 2), 'utf8');
 }
+try { persistEvents(); } catch (err) { console.error('清理過期即時事件失敗：', err.message); }
 let orderBusy = false;
 let bitoTwdPrice = null;
 let bitoTwdPriceAt = null;
