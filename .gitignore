@@ -2,6 +2,7 @@
 .env.*
 !.env.example
 
-/data/
+/data/*
+!/data/.gitkeep
 node_modules/
 *.log
