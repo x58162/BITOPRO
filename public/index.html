@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BitoPro 套利管理台</title>
+<style>
+:root{--bg:#0b1020;--panel:#121a2c;--panel2:#172238;--line:#26334d;--text:#eef3ff;--muted:#9eacc7;--green:#4de0a0;--red:#ff7185;--blue:#82b7ff;--gold:#f4c66b}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at top,#17243e 0,#0b1020 55%);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+header{padding:22px 26px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap}
+.brand{display:flex;gap:12px;align-items:center}.logo{width:42px;height:42px;border-radius:13px;background:linear-gradient(135deg,#73a8ff,#8c70ef);display:grid;place-items:center;font-weight:900;color:#081126;font-size:18px}.brand h1{margin:0;font-size:20px}.brand p{margin:3px 0 0;color:var(--muted)}
+.wrap{max-width:1450px;margin:auto;padding:22px;display:grid;gap:18px}.topline{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:center}
+.pill{padding:7px 11px;border:1px solid var(--line);border-radius:999px;color:var(--muted);display:inline-flex;gap:7px;align-items:center}.dot{width:8px;height:8px;border-radius:50%;background:var(--gold)}.dot.green{background:var(--green)}.dot.red{background:var(--red)}
+.actions{display:flex;gap:8px;flex-wrap:wrap}button,.btn{cursor:pointer;border:1px solid var(--line);background:#1b2943;color:var(--text);padding:10px 14px;border-radius:10px;font-weight:650;text-decoration:none}button:hover,.btn:hover{filter:brightness(1.14)}button.primary{background:#8ab6ff;color:#0b1425;border-color:#8ab6ff}button.stop{background:#482335;border-color:#7c3449}button:disabled{opacity:.45;cursor:not-allowed}
+.notice{border:1px solid #6e5630;background:#302718;color:#f6dca6;padding:13px 15px;border-radius:12px}
+.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:13px}.card{background:linear-gradient(160deg,#152039,#11192b);border:1px solid var(--line);border-radius:15px;padding:17px;min-width:0}.label{font-size:12px;color:var(--muted)}.metric{font-size:25px;font-weight:800;margin:8px 0 4px;letter-spacing:-.5px;overflow-wrap:anywhere}.sub{font-size:12px;color:var(--muted)}h2{font-size:16px;margin:0 0 14px}.twocol{display:grid;grid-template-columns:1.1fr .9fr;gap:16px}.tablewrap{overflow:auto;max-height:420px}table{border-collapse:collapse;width:100%;font-size:12px;white-space:nowrap}th,td{text-align:left;border-bottom:1px solid #26334a;padding:10px 9px}th{position:sticky;top:0;background:#172238;color:#afbed9;font-weight:650}td{color:#e0e8fa}.green{color:var(--green)}.red{color:var(--red)}.gold{color:var(--gold)}.muted{color:var(--muted)}.empty{text-align:center;color:var(--muted);padding:30px}
+.asset-head{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;flex-wrap:wrap}.asset-main{font-size:34px;font-weight:800;letter-spacing:-.7px;margin:10px 0 16px}.asset-main small{font-size:15px;font-weight:500;letter-spacing:0}.asset-breakdown{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:12px}.asset-tile{padding:13px;border-radius:12px;color:#172033;min-width:0}.asset-tile:nth-child(1){background:#fbf0e5}.asset-tile:nth-child(2){background:#eaf5f3}.asset-tile:nth-child(3){background:#edf1ff}.asset-tile:nth-child(4){background:#f5effb}.asset-tile .label{color:#526078}.asset-tile strong{display:block;margin-top:7px;font-size:16px;overflow-wrap:anywhere}.asset-hint{font-size:12px;color:var(--muted);margin-top:10px}.pairgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.quote-group{margin:12px 0}.quote-title{font-size:13px;color:var(--blue);margin:0 0 8px}.pair-head{display:flex;align-items:center;justify-content:space-between;gap:6px}.remove-pair{padding:3px 7px;font-size:11px;background:#482335;border-color:#7c3449}.add-pair-form{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.add-pair-form input{min-width:120px;flex:1;padding:9px;background:#0b1324;border:1px solid #34445f;border-radius:7px;color:var(--text)}.pair{background:#10192b;border:1px solid #26334d;border-radius:10px;padding:10px}.pair strong{display:block;font-size:12px}.pair span{font-size:13px;color:var(--gold)}.spread-input{width:100%;margin-top:7px;padding:8px;background:#0b1324;border:1px solid #34445f;border-radius:7px;color:var(--text)}.spread-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px}.spread-help{font-size:12px;color:var(--muted)}.orderform{display:grid;grid-template-columns:repeat(5,minmax(120px,1fr));gap:10px;align-items:end}.orderform label{display:grid;gap:6px;color:var(--muted);font-size:12px}.orderform input,.orderform select{width:100%;padding:10px;background:#0b1324;border:1px solid #34445f;border-radius:8px;color:var(--text)}.orderhint{font-size:12px;color:var(--muted);margin:10px 0}.order-actions{display:flex;gap:6px}.order-actions button{padding:6px 9px;font-size:11px}.settings-overlay{position:fixed;inset:0;background:rgba(2,7,18,.78);display:none;align-items:center;justify-content:center;padding:18px;z-index:9998}.settings-overlay.open{display:flex}.settings-modal{width:min(1000px,100%);max-height:92vh;overflow:auto;background:#111b2e;border:1px solid #34445f;border-radius:16px;padding:20px;box-shadow:0 20px 70px rgba(0,0,0,.55)}.settings-modal-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}.settings-modal-head h2{margin:0}.settings-overlay .add-pair-form{margin-top:14px}.edit-order-overlay{position:fixed;inset:0;background:rgba(2,7,18,.78);display:none;align-items:center;justify-content:center;padding:18px;z-index:9999}.edit-order-overlay.open{display:flex}.edit-order-modal{width:min(680px,100%);max-height:92vh;overflow:auto;background:#111b2e;border:1px solid #34445f;border-radius:16px;padding:20px;box-shadow:0 20px 70px rgba(0,0,0,.55)}.edit-order-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.edit-order-grid label{display:grid;gap:6px;color:var(--muted);font-size:12px}.edit-order-grid input,.edit-order-grid select{width:100%;padding:11px;background:#0b1324;border:1px solid #34445f;border-radius:8px;color:var(--text)}.edit-order-grid .full{grid-column:1/-1}.edit-order-total{background:#1b2943;border:1px solid #34445f;padding:12px;border-radius:9px}.edit-order-actions{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:16px}@media(max-width:600px){.edit-order-grid{grid-template-columns:1fr}.edit-order-grid .full{grid-column:auto}}@media(max-width:900px){.orderform{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.eventlist{display:grid;gap:8px;max-height:360px;overflow:auto}.event{display:grid;grid-template-columns:76px 1fr;gap:9px;padding:10px;background:#10192b;border-radius:9px;border:1px solid #222f47}.event time{font-size:11px;color:var(--muted)}.event p{margin:0;overflow-wrap:anywhere}.tag{font-size:10px;border-radius:5px;padding:2px 5px;background:#243653;color:#c5d8ff;margin-right:5px}
+footer{color:var(--muted);font-size:12px;text-align:center;padding:4px 0 18px}
+@media(max-width:1000px){.asset-breakdown{grid-template-columns:repeat(2,minmax(0,1fr))}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.twocol{grid-template-columns:1fr}.pairgrid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:560px){header{padding:17px}.wrap{padding:13px}.grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.card{padding:12px}.metric{font-size:20px}.actions button{flex:1}.event{grid-template-columns:62px 1fr}}
+tr.balance-up td{color:var(--green);background:rgba(22,163,74,.08)}tr.balance-down td{color:var(--red);background:rgba(220,38,38,.08)}</style>
+</head>
+<body>
+<header><div class="brand"><div class="logo">B</div><div><h1>BitoPro 套利管理台</h1><p>交易監控・每日紀錄・策略觀察</p></div></div><div class="actions"><a class="btn" href="/api/export.csv">匯出 CSV</a><button onclick="refreshBalance()">更新餘額</button></div></header>
+<main class="wrap">
+
+<div class="notice"><strong>安全提醒：</strong>預設為模擬模式（LIVE_TRADING=false）。切換實盤前請確認 API 權限、IP 白名單、價差及手續費。停止程式不會自動撤銷交易所已存在的掛單。</div>
+<section class="grid">
+<div class="card"><div class="label">今日反向掛單訊號</div><div class="metric" id="todaySignals">0</div><div class="sub">不是實際成交數</div></div>
+<div class="card"><div class="label">今日成交筆數</div><div class="metric" id="todayFills">0</div><div class="sub">由歷史訊息偵測</div></div>
+<div class="card"><div class="label">今日估算淨價差</div><div class="metric" id="todayNet">—</div><div class="sub">估算值，非已實現損益</div></div>
+<div class="card"><div class="label">歷史紀錄筆數</div><div class="metric" id="totalRecords">0</div><div class="sub">本機 JSON 紀錄</div></div>
+</section>
+<section class="card"><h2>帳戶餘額</h2><div id="balances" class="tablewrap"><div class="empty">尚未取得餘額</div></div></section>
+<section class="card"><div class="topline"><h2 style="margin:0">交易所真實掛單管理</h2><div class="actions"><button class="primary" type="button" onclick="openSpreadSettings()"><span aria-hidden="true">⚙ </span>策略價差設定</button><label>掛單篩選<select id="orderFilterPair"><option value="">全部交易對</option></select></label><span class="muted" id="orderAutoRefreshStatus">自動同步中（每 10 秒）</span></div></div><div class="notice" style="margin:12px 0">此區會直接呼叫 BitoPro API。新增會建立真實委託；刪除會撤銷交易所掛單；修改會先撤銷舊單再建立新單（不是原子操作）。請確認交易對、方向、價格、數量後再操作。</div><form id="exchangeOrderForm" class="orderform" onsubmit="submitExchangeOrder(event)"><label>交易對<select id="orderPair"></select></label><label>方向<select id="orderAction"><option value="BUY">BUY 買入</option><option value="SELL">SELL 賣出</option></select></label><label>價格<input id="orderPrice" type="number" min="0.00000001" step="any" required></label><label>數量<input id="orderAmount" type="number" min="0.00000001" step="any" required></label><label>委託條件<select id="orderTif"><option value="POST_ONLY">POST_ONLY（只掛 Maker）</option><option value="GTC">GTC</option></select></label><div class="actions"><button class="primary" type="submit">確認建立真實委託</button></div></form><p class="orderhint" id="orderStatus">掛單列表尚未載入。需要 .env 中的 API Key、Secret、Email，且 API Key 必須有交易及撤單權限。</p><div class="tablewrap"><table><thead><tr><th>建立／更新時間</th><th>訂單 ID</th><th>交易對</th><th>方向</th><th>價格</th><th>原始數量</th><th>已成交</th><th>剩餘</th><th>操作</th></tr></thead><tbody id="exchangeOrdersBody"><tr><td colspan="9" class="empty">正在自動讀取交易所掛單…</td></tr></tbody></table></div></section>
+<section class="card"><h2>每日統計</h2><div class="tablewrap"><table><thead><tr><th>日期</th><th>完整成交</th><th>反向訊號</th><th>已送出</th><th>失敗</th><th>獲利（已配對毛利）</th><th>估算手續費</th><th>估算淨價差</th></tr></thead><tbody id="dailyBody"></tbody></table></div></section>
+<div class="twocol">
+<section class="card"><div class="topline"><h2 style="margin:0">最近交易／策略紀錄</h2></div><div class="notice" style="margin:12px 0">僅顯示 2026/10/18 起的成交紀錄；更早紀錄保留在資料檔中供歷史配對統計使用。</div><div class="tablewrap"><table><thead><tr><th>時間</th><th>類型</th><th>交易對</th><th>方向</th><th>價格</th><th>成交數量</th><th>手續費</th><th>BITO/TWD 成交分鐘參考價</th><th>手續費台幣成本</th><th>結果</th></tr></thead><tbody id="journalBody"></tbody></table></div></section>
+<section class="card"><h2>即時事件</h2><div class="eventlist" id="events"><div class="empty">等待事件…</div></div></section>
+</div>
+<div id="spreadSettingsOverlay" class="settings-overlay" role="dialog" aria-modal="true" aria-labelledby="spreadSettingsTitle" onclick="if(event.target===this)closeSpreadSettings()"><div class="settings-modal"><div class="settings-modal-head"><h2 id="spreadSettingsTitle">策略價差設定</h2><button type="button" onclick="closeSpreadSettings()" aria-label="關閉設定">關閉 ✕</button></div><p class="sub">依報價幣別分組：TWD 價差以台幣計；USDT 價差以 USDT 計。新增前請確認交易所確實支援該交易對。</p><div class="add-pair-form"><input id="newPair" placeholder="交易對，例如 ada_twd、eth_usdt"><input id="newSpread" type="number" min="0" step="any" value="0" placeholder="初始價差" aria-label="新增交易對初始價差"><button class="primary" onclick="addPair()">新增交易對</button></div><div id="spreads"></div><div class="spread-actions"><button class="primary" onclick="saveSpreads()">儲存價差設定</button><button onclick="resetSpreadInputs()">重新載入目前設定</button><span class="spread-help" id="spreadStatus">修改後按「儲存價差設定」才會生效。</span></div><p class="sub">價差單位與交易對報價幣別一致。新設定會套用於之後產生的反向掛單訊號，不會修改交易所已存在的掛單。請先在模擬模式驗證。</p></div></div><div id="editOrderOverlay" class="edit-order-overlay" role="dialog" aria-modal="true" aria-labelledby="editOrderTitle" onclick="if(event.target===this)closeEditOrderModal()"><div class="edit-order-modal"><h2 id="editOrderTitle">修改真實掛單</h2><p class="sub">可同時修改交易對、方向、價格、數量與委託條件。委託金額會依「價格 × 數量」同步計算；也可以輸入委託金額反算數量。</p><form id="editOrderForm" onsubmit="submitEditOrder(event)"><div class="edit-order-grid"><label>交易對<select id="editOrderPair" required></select></label><label>方向<select id="editOrderAction"><option value="BUY">BUY 買入</option><option value="SELL">SELL 賣出</option></select></label><label>價格<input id="editOrderPrice" type="number" min="0.00000001" step="any" required></label><label>數量（基礎幣）<input id="editOrderAmount" type="number" min="0.00000001" step="any" required></label><label class="full">委託金額（報價幣）<input id="editOrderTotal" type="number" min="0.00000001" step="any" required><span class="sub">修改金額會依目前價格自動換算數量；修改數量則會重新計算金額。</span></label><label class="full">委託條件<select id="editOrderTif"><option value="POST_ONLY">POST_ONLY（只掛 Maker）</option><option value="GTC">GTC</option></select></label></div><div class="notice" style="margin-top:14px">真實修改會先撤銷舊單，再建立新單，並非原子操作。若新單建立失敗，舊單不會自動恢復。</div><div id="editOrderError" class="orderhint"></div><div class="edit-order-actions"><button type="button" onclick="closeEditOrderModal()">取消</button><button class="primary" type="submit">確認修改真實委託</button></div></form></div></div><footer>資料保存在此電腦的 data/journal.json。網站統計是交易紀錄工具，不保證套利獲利；請先以模擬模式驗證。</footer>
+</main>
+<script>
+let state = {};
+const $ = id => document.getElementById(id);
+const fmt = (n, digits=4) => Number(n||0).toLocaleString('zh-TW',{maximumFractionDigits:digits});
+const money = n => fmt(n, 4);
+function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+async function api(url, method='GET'){const r=await fetch(url,{method,headers:{'Content-Type':'application/json'}});const d=await r.json();if(!r.ok||d.ok===false)throw new Error(JSON.stringify(d.error||d));return d;}
+async function refreshBalance(){try{await api('/api/balance','POST');await load();toast('餘額已更新');}catch(e){toast(e.message)}}
+function toast(s){console.log(s);alert(s)}
+const BALANCE_BASELINES_KEY = 'bitoBalanceAmountBaselinesV1';
+function getBalanceBaselines(rows) {
+  let baselines = {};
+  try {
+    const saved = localStorage.getItem(BALANCE_BASELINES_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) baselines = parsed;
+    }
+  } catch {}
+
+  // 每個幣別第一次成功出現在餘額資料時，記錄其「總額」作為固定起點。
+  // 後續更新只比較目前總額與這個起點，不會因重新 render 而重設。
+  let changed = false;
+  for (const row of (rows || [])) {
+    const currency = String(row.currency || '').toUpperCase();
+    const amount = Number(row.amount);
+    if (!currency || !Number.isFinite(amount)) continue;
+    if (!Object.prototype.hasOwnProperty.call(baselines, currency) || !Number.isFinite(Number(baselines[currency]))) {
+      baselines[currency] = amount;
+      changed = true;
+    }
+  }
+  if (changed) {
+    try { localStorage.setItem(BALANCE_BASELINES_KEY, JSON.stringify(baselines)); } catch {}
+  }
+  return baselines;
+}
+
+function render(){
+ const s=state.status||{};const dot=$('statusDot');if(dot)dot.className='dot '+(s.state==='connected'?'green':(['error','needs_config'].includes(s.state)?'red':''));
+ const statusText=$('statusText');if(statusText)statusText.textContent=(s.message||'未知')+(state.liveTrading?' · 實盤模式':' · 模擬模式');
+ const today=new Date().toLocaleDateString('sv-SE');const d=(state.daily||[]).find(x=>x.date===today)||{};
+ $('todaySignals').textContent=fmt(d.signals||0,0);$('todayFills').textContent=fmt(d.fills||0,0);$('todayNet').textContent=money(d.estimatedNet||0);$('totalRecords').textContent=fmt((state.journal||[]).length,0);
+ const allBalances=state.balances||[];
+ const balanceBaselines=getBalanceBaselines(allBalances);
+ // 隱藏零餘額與無台幣報價的幣別；所有幣別都依「總額」和各自固定起點比較。
+ const b=allBalances.filter(x=>Math.abs(Number(x.amount||0))>1e-12 && x.twdValue!=null && Number.isFinite(Number(x.twdValue)));
+ if ($('balances')) $('balances').innerHTML=b.length?`<table><thead><tr><th>幣別</th><th>總額</th><th>可用</th><th>估算台幣價值</th><th>與起始數量差額</th></tr></thead><tbody>${b.map(x=>{const currency=String(x.currency||'').toUpperCase();const baseline=Number(balanceBaselines[currency]);const current=Number(x.amount||0);const delta=Number.isFinite(baseline)?current-baseline:null;const cls=delta!==null?(delta>1e-12?'balance-up':delta< -1e-12?'balance-down':''):'';const deltaText=delta===null?'—':(delta>1e-12?'+':'')+fmt(delta,8);return `<tr class="${cls}"><td><b>${esc(x.currency)}</b></td><td>${fmt(x.amount,8)}</td><td>${fmt(x.available,8)}</td><td>NT$ ${fmt(x.twdValue,2)}</td><td>${deltaText}</td></tr>`}).join('')}</tbody></table>`:'<div class="empty">目前沒有有餘額且具台幣報價的資產</div>';
+ const spreadEntries=Object.entries(state.spreads||{});const groups={};for(const [p,v] of spreadEntries){const quote=p.split('_')[1]?.toUpperCase()||'其他';(groups[quote] ||= []).push([p,v]);}const quoteOrder=['TWD','USDT','USDC','BTC','ETH'];const quotes=[...quoteOrder.filter(q=>groups[q]),...Object.keys(groups).filter(q=>!quoteOrder.includes(q)).sort()];if ($('spreads')) $('spreads').innerHTML=quotes.map(q=>`<div class="quote-group"><h3 class="quote-title">${esc(q)} 報價 · 價差單位：${esc(q)}</h3><div class="pairgrid">${groups[q].map(([p,v])=>`<div class="pair"><div class="pair-head"><strong>${esc(p.toUpperCase())}</strong><button class="remove-pair" onclick="removePair('${esc(p)}')" title="移除此交易對">移除</button></div><input class="spread-input" type="number" min="0" step="any" id="spread-${esc(p)}" value="${esc(v)}" aria-label="${esc(p)} 價差"></div>`).join('')}</div></div>`).join('');
+ initOrderPairSelect();
+ if ($('dailyBody')) $('dailyBody').innerHTML=(state.daily||[]).length?(state.daily||[]).map(x=>`<tr><td>${esc(x.date)}</td><td>${x.fills}</td><td>${x.signals}</td><td>${x.submitted}</td><td>${x.failed}</td><td>${money(x.estimatedGross)}</td><td>${money(x.estimatedFees)}</td><td class="${x.estimatedNet>=0?'green':'red'}">${money(x.estimatedNet)}</td></tr>`).join(''):'<tr><td colspan="8" class="empty">尚無資料</td></tr>';
+ const journalSource=(state.journal||[]); const tradeOrderKeys=new Set(journalSource.filter(x=>x.category==='filled_trade'&&x.orderId!=null).map(x=>String(x.pair||'').toLowerCase()+'|'+String(x.orderId))); const cutoff18=Date.parse('2026-10-17T16:00:00.000Z'); const tradeTimeMs=(value)=>{if(value==null||value==='')return 0;if(typeof value==='number'||(/^\d{10,13}$/.test(String(value)))){const n=Number(value);return Number.isFinite(n)?(n<1e12?n*1000:n):0;}const n=Date.parse(value);return Number.isFinite(n)?n:0;}; const filledRows=journalSource.filter(x=>(x.category==='filled_trade'||(x.category==='filled_order'&&!tradeOrderKeys.has(String(x.pair||'').toLowerCase()+'|'+String(x.orderId||'')))) && tradeTimeMs(x.exchangeTime||x.time)>=cutoff18).sort((a,b)=>tradeTimeMs(b.exchangeTime||b.time)-tradeTimeMs(a.exchangeTime||a.time)); if ($('journalBody')) $('journalBody').innerHTML=filledRows.length?filledRows.slice(0,100).map(x=>{const feeReported=Number(x.fee)>0;const feeText=feeReported?fmt(x.fee,8)+' '+esc(x.feeCurrency||''):(x.category==='filled_order'?'待同步成交明細':'—');return `<tr><td>${esc(new Date(x.exchangeTime||x.time).toLocaleString())}</td><td>${esc(x.category==='filled_order'?'filled_order（待補成交明細）':x.category)}</td><td>${esc((x.pair||'').toUpperCase())}</td><td>${esc(x.action||'')}</td><td>${x.price==null?'—':fmt(x.price,8)}</td><td>${x.amount==null?'—':fmt(x.amount,8)}</td><td>${feeText}</td><td>${x.feeBitoTwdPrice==null?'—': 'NT$ '+fmt(x.feeBitoTwdPrice,8)+'<br><small class="muted">'+esc(x.feePriceTime||'')+'</small>'}</td><td>${x.feeTwdCost==null?'—': 'NT$ '+fmt(x.feeTwdCost,6)}</td><td>${esc(x.result||'')}</td></tr>`}).join(''):'<tr><td colspan="10" class="empty">尚無成交紀錄</td></tr>';  
+ if ($('events')) $('events').innerHTML=(state.events||[]).slice(0,60).map(x=>`<div class="event"><time>${esc(new Date(x.time).toLocaleTimeString())}</time><p><span class="tag">${esc(x.type)}</span>${esc(x.message||x.state||x.error||'')}</p></div>`).join('')||'<div class="empty">等待事件…</div>';
+}
+
+
+function openSpreadSettings(){render();$('spreadSettingsOverlay').classList.add('open');document.body.style.overflow='hidden';}
+function closeSpreadSettings(){$('spreadSettingsOverlay').classList.remove('open');document.body.style.overflow='';}
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&$('spreadSettingsOverlay')?.classList.contains('open'))closeSpreadSettings();});
+async function saveSpreads(){try{const next={};for(const [p] of Object.entries(state.spreads||{})){const el=$('spread-'+p);if(!el||el.value.trim()===''||!Number.isFinite(Number(el.value))||Number(el.value)<0){throw new Error(p.toUpperCase()+' 價差必須是大於或等於 0 的數字');}next[p]=Number(el.value);}const d=await fetch('/api/spreads',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(next)});const result=await d.json();if(!d.ok||result.ok===false)throw new Error(result.error||'儲存失敗');state.spreads=result.spreads;render();$('spreadStatus').textContent='已儲存 '+new Date().toLocaleTimeString();toast(result.message);}catch(e){$('spreadStatus').textContent='儲存失敗：'+e.message;}}
+async function addPair(){try{const pair=$('newPair').value.trim();const spread=$('newSpread').value.trim();if(!pair)throw new Error('請輸入交易對，例如 ada_twd 或 eth_usdt');if(spread===''||!Number.isFinite(Number(spread))||Number(spread)<0)throw new Error('請輸入有效的初始價差');const d=await fetch('/api/pairs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'add',pair,spread:Number(spread)})});const result=await d.json();if(!d.ok||result.ok===false)throw new Error(result.error||'新增失敗');state.pairs=result.pairs;state.spreads=result.spreads;$('newPair').value='';$('newSpread').value='0';render();$('spreadStatus').textContent=result.message;}catch(e){toast(e.message)}}
+async function removePair(pair){if(!confirm('確定移除 '+pair.toUpperCase()+'？這只會移除管理台設定，不會撤銷交易所已有掛單。'))return;try{const d=await fetch('/api/pairs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'remove',pair})});const result=await d.json();if(!d.ok||result.ok===false)throw new Error(result.error||'移除失敗');state.pairs=result.pairs;state.spreads=result.spreads;render();$('spreadStatus').textContent=result.message;}catch(e){toast(e.message)}}
+function resetSpreadInputs(){render();$('spreadStatus').textContent='已重新載入伺服器目前設定。'}
+let initialBalanceReadStarted = false;
+async function load(){try{state=await api('/api/state');render();if(!initialBalanceReadStarted){initialBalanceReadStarted=true;api('/api/balance','POST').then(d=>{state.balances=d.balances||state.balances;render();}).catch(e=>console.warn('初次讀取帳戶餘額失敗',e.message));}}catch(e){const statusText=$('statusText');if(statusText)statusText.textContent='無法連線至後端：'+e.message;console.error('無法載入後端狀態',e)}}
+function connectLive(){
+  const scheme=location.protocol==='https:'?'wss:':'ws:';
+  const live=new WebSocket(`${scheme}//${location.host}/live`);
+  live.addEventListener('message',ev=>{
+    try{const msg=JSON.parse(ev.data);
+      if(msg.kind==='snapshot'&&msg.state){state={...state,...msg.state};render();}
+      else if(msg.kind==='event'&&msg.item){
+        const item=msg.item;state.events=[item,...(state.events||[])].slice(0,100);
+        if(item.type==='journal'||item.type==='balances'||item.type==='status'){load();return;}
+        if(item.type==='error'){toast('失敗：'+(item.message||item.error||'未知錯誤'));}
+        else if(item.type==='warning' && /重試|資產失敗|更新帳戶/i.test(item.message||'')){toast(item.message||'警告');}
+        render();
+      }
+    }catch(e){console.warn('即時更新解析失敗',e)}
+  });
+  live.addEventListener('close',()=>setTimeout(connectLive,3000));
+}
+
+function initOrderPairSelect(){
+  const pairs=Object.keys(state.spreads||{});
+  const sel=$('orderPair');
+  if(sel){const old=sel.value;sel.innerHTML=pairs.map(p=>`<option value="${esc(p)}">${esc(p.toUpperCase())}</option>`).join('');if(pairs.includes(old))sel.value=old;}
+  const filter=$('orderFilterPair');
+  if(filter){const oldFilter=filter.value;filter.innerHTML='<option value="">全部交易對</option>'+pairs.map(p=>`<option value="${esc(p)}">${esc(p.toUpperCase())}</option>`).join('');if(oldFilter===''||pairs.includes(oldFilter))filter.value=oldFilter;}
+}
+let exchangeOrdersLoading = false;
+let exchangeOrdersLastLoadedAt = 0;
+async function loadExchangeOrders(options={}){
+  if(exchangeOrdersLoading) return;
+  exchangeOrdersLoading = true;
+  const body=$('exchangeOrdersBody');const statusEl=$('orderStatus');
+  const silent=options.silent===true;
+  if(!silent && !exchangeOrdersLastLoadedAt) body.innerHTML='<tr><td colspan="9" class="empty">正在向 BitoPro 查詢真實掛單…</td></tr>';
+  try{
+    const pair=$('orderFilterPair')?.value||'';
+    const d=await api('/api/orders/open'+(pair?'?pair='+encodeURIComponent(pair):''));
+    const raw=d.orders??d.data??[];
+    const orders=Array.isArray(raw)?raw:(Array.isArray(raw.orders)?raw.orders:(Array.isArray(raw.data)?raw.data:[]));
+    body.innerHTML=orders.length?orders.map(o=>{const id=o.id||o.orderId||'';const pairName=String(o.pair||pair).toLowerCase();const ts=Number(o.updatedTimestamp||o.createdTimestamp||Date.now());return `<tr><td>${esc(new Date(ts<1e12?ts*1000:ts).toLocaleString())}</td><td>${esc(id)}</td><td>${esc(pairName.toUpperCase())}</td><td>${esc(o.action||'')}</td><td>${fmt(o.price,10)}</td><td>${fmt(o.originalAmount,10)}</td><td>${fmt(o.executedAmount,10)}</td><td>${fmt(o.remainingAmount,10)}</td><td><div class="order-actions"><button onclick="editExchangeOrder('${esc(pairName)}','${esc(id)}','${esc(o.action||'BUY')}',${Number(o.price)||0},${Number(o.remainingAmount||o.originalAmount)||0})">修改</button><button class="stop" onclick="cancelExchangeOrder('${esc(pairName)}','${esc(id)}')">刪除／撤單</button></div></td></tr>`}).join(''):'<tr><td colspan="9" class="empty">交易所目前沒有符合此交易對的掛單</td></tr>';
+    exchangeOrdersLastLoadedAt=Date.now();
+    const refreshedAt=new Date().toLocaleTimeString();
+    statusEl.textContent=`已自動同步 BitoPro ${orders.length} 筆掛單（${pair?pair.toUpperCase():'全部交易對'}；更新時間 ${refreshedAt}）。`;
+    const autoStatus=$('orderAutoRefreshStatus');if(autoStatus)autoStatus.textContent=`自動同步中 · 最近更新 ${refreshedAt}`;
+  }catch(e){
+    if(!exchangeOrdersLastLoadedAt) body.innerHTML='<tr><td colspan="9" class="empty">無法取得交易所掛單</td></tr>';
+    statusEl.textContent='讀取失敗：'+e.message;
+    const autoStatus=$('orderAutoRefreshStatus');if(autoStatus)autoStatus.textContent='自動同步失敗，將再試一次';
+  }finally{exchangeOrdersLoading=false;}
+}
+async function submitExchangeOrder(ev){
+  ev.preventDefault();const pair=$('orderPair').value;const action=$('orderAction').value;const price=Number($('orderPrice').value);const amount=Number($('orderAmount').value);const timeInForce=$('orderTif').value;
+  if(!pair) return toast('請先在策略價差設定中加入交易對。');
+  const total=price*amount;
+  if(!confirm(`即將向 BitoPro 建立真實限價委託：\n\n交易對：${pair.toUpperCase()}\n方向：${action}\n價格：${price}\n數量：${amount}\n名目金額：約 ${fmt(total,8)}\n條件：${timeInForce}\n\n此操作會影響真實帳戶。確定送出嗎？`))return;
+  $('orderStatus').textContent='已送出請求，等待交易所回應…';
+  try{const d=await fetch('/api/orders',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pair,action,price,amount,timeInForce})});const r=await d.json();if(!d.ok||r.ok===false)throw new Error(typeof r.error==='string'?r.error:JSON.stringify(r.error||r));$('orderStatus').textContent=r.message||'交易所已回應';toast(r.message||'交易所已回應建立委託');$('orderPrice').value='';$('orderAmount').value='';await loadExchangeOrders();await load();}catch(e){$('orderStatus').textContent='建立失敗：'+e.message;toast('建立失敗：'+e.message)}
+}
+async function cancelExchangeOrder(pair,id){if(!confirm(`確定向 BitoPro 撤銷真實掛單？\n\n${pair.toUpperCase()}\n訂單 ID：${id}\n\n若已成交或正在成交，可能無法撤銷。`))return;try{const d=await fetch(`/api/orders/${encodeURIComponent(pair)}/${encodeURIComponent(id)}`,{method:'DELETE',headers:{'Content-Type':'application/json'}});const r=await d.json();if(!d.ok||r.ok===false)throw new Error(typeof r.error==='string'?r.error:JSON.stringify(r.error||r));toast(r.message||'撤單請求已回應');await loadExchangeOrders();await load();}catch(e){toast('撤單失敗：'+e.message)}}
+let editOrderContext = null;
+function updateEditOrderTotal(source){
+  const price=Number($('editOrderPrice').value), amount=Number($('editOrderAmount').value), totalEl=$('editOrderTotal');
+  if(!(price>0)) return;
+  if(source==='total'){
+    const total=Number(totalEl.value);
+    if(total>0) $('editOrderAmount').value=String(total/price);
+  } else {
+    const qty=Number($('editOrderAmount').value);
+    if(qty>0) totalEl.value=String(price*qty);
+  }
+}
+function closeEditOrderModal(){ $('editOrderOverlay')?.classList.remove('open'); editOrderContext=null; }
+function editExchangeOrder(pair,id,action,price,amount){
+  const availablePairs=Object.keys(state.spreads||{});
+  if(!availablePairs.length) return toast('目前沒有可用交易對，請先確認交易對設定。');
+  editOrderContext={pair,id};
+  $('editOrderPair').innerHTML=availablePairs.map(p=>`<option value="${esc(p)}">${esc(p.toUpperCase())}</option>`).join('');
+  $('editOrderPair').value=availablePairs.includes(pair)?pair:availablePairs[0];
+  $('editOrderAction').value=action==='SELL'?'SELL':'BUY';
+  $('editOrderPrice').value=String(price);
+  $('editOrderAmount').value=String(amount);
+  $('editOrderTotal').value=String(Number(price)*Number(amount));
+  $('editOrderTif').value=$('orderTif').value||'POST_ONLY';
+  $('editOrderError').textContent='';
+  $('editOrderOverlay').classList.add('open');
+}
+$('editOrderPrice')?.addEventListener('input',()=>updateEditOrderTotal('price'));
+$('editOrderAmount')?.addEventListener('input',()=>updateEditOrderTotal('amount'));
+$('editOrderTotal')?.addEventListener('input',()=>updateEditOrderTotal('total'));
+async function submitEditOrder(ev){
+  ev.preventDefault(); if(!editOrderContext)return;
+  const {pair,id}=editOrderContext;
+  const newPair=$('editOrderPair').value;
+  const action=$('editOrderAction').value;
+  const price=Number($('editOrderPrice').value);
+  const amount=Number($('editOrderAmount').value);
+  const total=Number($('editOrderTotal').value);
+  const timeInForce=$('editOrderTif').value;
+  if(!Object.keys(state.spreads||{}).includes(newPair)) return $('editOrderError').textContent='交易對不在目前支援清單中，請先到策略價差設定加入。';
+  if(!['BUY','SELL'].includes(action)||!(price>0)||!(amount>0)||!(total>0)||!['POST_ONLY','GTC'].includes(timeInForce)) return $('editOrderError').textContent='請確認方向、價格、數量、金額及委託條件。';
+  if(Math.abs(price*amount-total)>Math.max(1e-8,Math.abs(total)*1e-6)) return $('editOrderError').textContent='委託金額與價格 × 數量不一致，請重新確認。';
+  if(!confirm(`修改真實掛單會先撤銷舊單，再建立新單，並非原子操作。若新單建立失敗，舊單不會恢復。
+
+舊單：${pair.toUpperCase()} #${id}
+新交易對：${newPair.toUpperCase()}
+方向：${action}
+價格：${price}
+數量：${amount}
+委託金額：約 ${fmt(total,8)}
+條件：${timeInForce}
+
+確定繼續？`))return;
+  const submitBtn=$('editOrderForm')?.querySelector('button[type="submit"]'); if(submitBtn)submitBtn.disabled=true;
+  $('editOrderError').textContent='正在撤銷舊單並建立新單…';
+  try{
+    const d=await fetch(`/api/orders/${encodeURIComponent(pair)}/${encodeURIComponent(id)}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({newPair,action,price,amount,timeInForce})});
+    const r=await d.json(); if(!d.ok||r.ok===false)throw new Error(typeof r.error==='string'?r.error:JSON.stringify(r.error||r));
+    closeEditOrderModal(); toast(r.message||'修改完成'); await loadExchangeOrders(); await load();
+  }catch(e){$('editOrderError').textContent='修改失敗：'+e.message;toast('修改失敗：'+e.message)}
+  finally{if(submitBtn)submitBtn.disabled=false;}
+}
+
+load();connectLive();
+// 掛單由伺服器自動同步，不再要求使用者手動按重新整理。
+loadExchangeOrders();
+setInterval(()=>loadExchangeOrders({silent:true}),10000);
+$('orderFilterPair')?.addEventListener('change',()=>loadExchangeOrders());
+</script>
+</body></html>
