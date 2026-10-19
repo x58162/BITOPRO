@@ -104,6 +104,57 @@ function setStatus(state, message, error = null) {
   emit('status', { state, message, error });
 }
 function credentialsReady() { return !!(API_KEY && API_SECRET && EMAIL); }
+
+// API 專用時間校正：使用 BitoPro 公開 API 回應的 HTTP Date 標頭估算時差。
+// 不修改 Windows 系統時間，也不改動本機日誌/成交紀錄使用的時間。
+let apiTimeOffsetMs = 0;
+let apiTimeCalibrationAt = null;
+let apiTimeCalibrationInProgress = false;
+let lastApiTimestamp = 0;
+function apiTimestamp() {
+  const candidate = Date.now() + apiTimeOffsetMs;
+  lastApiTimestamp = Math.max(candidate, lastApiTimestamp + 1);
+  return lastApiTimestamp;
+}
+async function calibrateApiTime() {
+  if (apiTimeCalibrationInProgress) return { ok: false, skipped: true };
+  apiTimeCalibrationInProgress = true;
+  const startedAt = Date.now();
+  try {
+    const response = await axios.get('https://api.bitopro.com/v3/tickers/bito_twd', { timeout: 8000 });
+    const finishedAt = Date.now();
+    const serverDate = Date.parse(response.headers?.date || '');
+    if (!Number.isFinite(serverDate)) {
+      logOrderConsole('warn', 'BitoPro 時間校正未完成：回應沒有有效的 Date 標頭');
+      return { ok: false, error: 'missing_date_header' };
+    }
+    // 以請求往返的中點估算發出請求時的本機時間，降低網路延遲造成的偏差。
+    const midpoint = startedAt + (finishedAt - startedAt) / 2;
+    const measuredOffset = Math.round(serverDate - midpoint);
+    // 只接受合理範圍內的伺服器時間，避免錯誤標頭導致所有 API timestamp 大幅偏移。
+    if (Math.abs(measuredOffset) > 24 * 60 * 60 * 1000) {
+      logOrderConsole('warn', 'BitoPro 時間校正結果超出 24 小時，保留原本時間偏移', { measuredOffsetMs: measuredOffset });
+      return { ok: false, error: 'offset_out_of_range', measuredOffsetMs: measuredOffset };
+    }
+    apiTimeOffsetMs = measuredOffset;
+    apiTimeCalibrationAt = new Date().toISOString();
+    logOrderConsole('info', 'BitoPro API 時間校正完成', {
+      offsetMs: apiTimeOffsetMs,
+      offsetSeconds: Number((apiTimeOffsetMs / 1000).toFixed(3)),
+      roundTripMs: finishedAt - startedAt,
+      calibratedAt: apiTimeCalibrationAt
+    });
+    return { ok: true, offsetMs: apiTimeOffsetMs, calibratedAt: apiTimeCalibrationAt };
+  } catch (err) {
+    logOrderConsole('warn', 'BitoPro API 時間校正失敗，暫時使用本機時間', {
+      error: apiErrorMessage(err),
+      httpStatus: err.response?.status || null
+    });
+    return { ok: false, error: apiErrorMessage(err) };
+  } finally {
+    apiTimeCalibrationInProgress = false;
+  }
+}
 function signedHeaders(payload) {
   const encoded = Buffer.from(JSON.stringify(payload)).toString('base64');
   const signature = crypto.createHmac('sha384', API_SECRET).update(encoded).digest('hex');
@@ -114,7 +165,7 @@ function signedHeaders(payload) {
   };
 }
 function authHeaders() {
-  const payload = { identity: EMAIL, nonce: Date.now() };
+  const payload = { identity: EMAIL, nonce: apiTimestamp() };
   return signedHeaders(payload);
 }
 function signedOrderHeaders(payload, urlSafe = false) {
@@ -593,7 +644,7 @@ async function placeCounterOrder(fill) {
     action: target.action,
     amount: String(amount),
     price: String(target.price),
-    timestamp: Date.now(),
+    timestamp: apiTimestamp(),
     type: 'LIMIT',
     timeInForce: 'POST_ONLY'
   };
@@ -626,7 +677,7 @@ async function placeCounterOrder(fill) {
   // 最多嘗試兩次。若第一次沒有收到 HTTP 回應（例如逾時），結果可能不確定，
   // 不自動重送以免交易所其實已收單卻造成重複委託。
   for (let attempt = 1; attempt <= 2; attempt++) {
-    const attemptPayload = { ...payload, timestamp: Date.now() };
+    const attemptPayload = { ...payload, timestamp: apiTimestamp() };
     logOrderConsole('info', `反向委託建立中（第 ${attempt}/2 次）`, { pair: fill.pair, action: target.action, amount, price: target.price, timestamp: attemptPayload.timestamp });
     try {
       const response = await axios.post(
@@ -993,7 +1044,7 @@ app.get('/api/orders/open', async (req, res) => {
   if (!requireCredentials(res)) return;
   const pair = String(req.query.pair || '').trim().toLowerCase();
   if (pair && !validPair(pair)) return res.status(400).json({ ok: false, error: '交易對格式不正確。' });
-  const authPayload = { identity: EMAIL, nonce: Date.now() };
+  const authPayload = { identity: EMAIL, nonce: apiTimestamp() };
   try {
     const response = await axios.get('https://api.bitopro.com/v3/orders/open', {
       params: pair ? { pair } : {},
@@ -1054,7 +1105,7 @@ app.delete('/api/orders/:pair/:id', async (req, res) => {
   if (!validPair(pair) || !id || id.length > 100) return res.status(400).json({ ok: false, error: '交易對或訂單 ID 不正確。' });
   try {
     const response = await axios.delete(`https://api.bitopro.com/v3/orders/${pair}/${encodeURIComponent(id)}`, {
-      headers: signedOrderHeaders({ identity: EMAIL, nonce: Date.now() }), timeout: 15000
+      headers: signedOrderHeaders({ identity: EMAIL, nonce: apiTimestamp() }), timeout: 15000
     });
     const result = response.data?.data ?? response.data;
     addJournal({ category: 'manual_exchange_cancel', pair, orderId: id, result: 'cancel_request_accepted', live: true });
@@ -1120,7 +1171,10 @@ const server = app.listen(PORT, () => {
   // 不再要求使用者按「啟動監控」，也不會因此自動啟動反向策略下單。
   running = true;
   setStatus('starting', '成交紀錄自動同步中');
-  setTimeout(() => {
+  setTimeout(async () => {
+    await calibrateApiTime();
+    // 定期更新 API 時差；失敗時沿用最近一次成功的校正值。
+    setInterval(() => { calibrateApiTime().catch(() => {}); }, 5 * 60 * 1000).unref?.();
     backfillTradeHistory().catch(err =>
       emit('warning', { message: `服務啟動時歷史成交回補失敗：${apiErrorMessage(err)}` })
     );
