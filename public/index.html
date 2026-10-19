@@ -118,8 +118,11 @@ function initMarketChart(){
   if(window.ResizeObserver){new ResizeObserver(()=>{if(marketChart&&priceEl.clientWidth)marketChart.applyOptions({width:priceEl.clientWidth,height:priceEl.clientHeight||340});if(marketVolumeChart&&volumeEl.clientWidth)marketVolumeChart.applyOptions({width:volumeEl.clientWidth,height:volumeEl.clientHeight||150});}).observe(priceEl);new ResizeObserver(()=>{if(marketVolumeChart&&volumeEl.clientWidth)marketVolumeChart.applyOptions({width:volumeEl.clientWidth,height:volumeEl.clientHeight||150});}).observe(volumeEl);}
 }
 function renderMarketDepth(rows,target,side){
-  const data=Array.isArray(rows)?rows:[];
-  target.innerHTML=data.slice(0,12).map(x=>{const price=Number(x.price),amount=Number(x.amount??x.volume??x.quantity);return Number.isFinite(price)&&Number.isFinite(amount)?'<div class="market-depth-row '+side+'"><span>'+marketFormat(price,8)+'</span><span>'+marketFormat(amount,8)+'</span><span>'+marketFormat(price*amount,4)+'</span></div>':''}).join('')||'<div class="empty">目前沒有掛單資料</div>';
+  const data=Array.isArray(rows)?rows.slice(0,12):[];
+  // 賣單：低價放下方、往上價格遞增；買單：低價放上方、往下價格遞增。
+  if(side==='ask') data.reverse();
+  if(side==='bid') data.sort((a,b)=>Number(a.price)-Number(b.price));
+  target.innerHTML=data.map(x=>{const price=Number(x.price),amount=Number(x.amount??x.volume??x.quantity);return Number.isFinite(price)&&Number.isFinite(amount)?'<div class="market-depth-row '+side+'"><span>'+marketFormat(price,8)+'</span><span>'+marketFormat(amount,8)+'</span><span>'+marketFormat(price*amount,4)+'</span></div>':''}).join('')||'<div class="empty">目前沒有掛單資料</div>';
 }
 async function loadMarket(manual=false){
   if(marketLoadBusy)return;
