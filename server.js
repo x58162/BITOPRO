@@ -1090,7 +1090,8 @@ app.get('/api/market/:pair', async (req, res) => {
   const failures = requests.map((x,i)=>x.status==='rejected'?['ticker','orderBook','trades','candles'][i]+': '+apiErrorMessage(x.reason):null).filter(Boolean);
   res.json({ ok: true, pair, resolution, ticker, orderBook, trades, candles, warnings: failures });
 });
-\napp.get('/api/state', (req, res) => res.json({
+
+app.get('/api/state', (req, res) => res.json({
   status, running, liveTrading: LIVE_TRADING, credentialsReady: credentialsReady(),
   balances, assetValuation, events: events.slice(0, 100), daily: dailySummary(),
   journal: journal.slice(0, 200), spreads: SPREADS, bitoTwdPrice, bitoTwdPriceAt
