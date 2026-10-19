@@ -387,7 +387,7 @@ async function backfillTradeHistory() {
       const sameAmount = Math.abs(Number(x.amount) - normalized.amount) < 1e-8;
       const existingStampMs = Date.parse(toIsoTimestamp(x.exchangeTime || '') || '');
       const sameTime = Number.isFinite(tradeStampMs) && Number.isFinite(existingStampMs)
-        && Math.abs(existingStampMs - tradeStampMs) <= 120000;
+        && Math.abs(existingStampMs - tradeStampMs) <= 5000;
       return sameOrder && sameAction && samePrice && sameAmount && sameTime;
     });
     const duplicate = duplicateIndex >= 0;
