@@ -1064,6 +1064,30 @@ function dailySummary() {
   return rows;
 }
 
+app.get('/api/market-summary/:pair', async (req, res) => {
+  const pair = String(req.params.pair || '').toLowerCase();
+  if (!validPair(pair) || !PAIRS.includes(pair)) {
+    return res.status(400).json({ ok: false, error: '此交易對不在目前支援清單中，請先到策略價差設定加入。' });
+  }
+  try {
+    const response = await axios.get(`https://api.bitopro.com/v3/tickers/${pair}`, { timeout: 10000 });
+    const root = response.data?.data ?? response.data;
+    const rows = Array.isArray(root) ? root : (root ? [root] : []);
+    const raw = rows.find(x => String(x.pair || '').toLowerCase() === pair) || rows[0] || {};
+    const lastPrice = Number(raw.lastPrice ?? raw.last_price ?? raw.price ?? raw.close ?? raw.last);
+    const high = Number(raw.high24hr ?? raw.high_24hr ?? raw.high ?? raw.highPrice);
+    const low = Number(raw.low24hr ?? raw.low_24hr ?? raw.low ?? raw.lowPrice);
+    res.json({ ok: true, pair, ticker: {
+      lastPrice: Number.isFinite(lastPrice) && lastPrice > 0 ? lastPrice : null,
+      high: Number.isFinite(high) && high > 0 ? high : null,
+      low: Number.isFinite(low) && low > 0 ? low : null,
+      rangeDifference: Number.isFinite(high) && Number.isFinite(low) && high > 0 && low > 0 ? high - low : null
+    }});
+  } catch (err) {
+    res.status(502).json({ ok: false, error: apiErrorMessage(err) });
+  }
+});
+
 app.get('/api/market/:pair', async (req, res) => {
   const pair = String(req.params.pair || '').toLowerCase();
   if (!validPair(pair) || !PAIRS.includes(pair)) {
