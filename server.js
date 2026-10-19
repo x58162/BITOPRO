@@ -934,13 +934,22 @@ function dailySummary() {
     }
   }
 
-  // Count fills and fee costs on the actual fill date. Missing fee conversion remains
-  // unknown (not silently treated as zero).
+  // Daily "完整成交" counts each exchange order once, even when the exchange
+  // reports that order as several partial filled_trade rows. Fee costs and FIFO P/L
+  // still use every distinct execution row below, so partial-fill fees are not lost.
+  const countedOrderKeys = new Set();
   for (const e of fillRows) {
     const day = eventDay(e);
     const d = ensureDay(day);
     if (!d) continue;
-    d.fills++;
+    const orderId = e.orderId == null ? '' : String(e.orderId).trim();
+    const orderKey = orderId
+      ? `${day}|${String(e.pair || '').toLowerCase()}|${orderId}`
+      : `${day}|trade|${String(e.tradeId || e.matchID || e.id || '')}`;
+    if (!countedOrderKeys.has(orderKey)) {
+      countedOrderKeys.add(orderKey);
+      d.fills++;
+    }
     const feeTwd = Number(e.feeTwdCost);
     if (Number.isFinite(feeTwd) && feeTwd >= 0) {
       d.estimatedFees += feeTwd;
