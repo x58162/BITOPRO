@@ -742,10 +742,46 @@ function dailySummary() {
   const tradeOrderIds = new Set(allFillRows
     .filter(e => e.category === 'filled_trade' && e.orderId != null)
     .map(e => `${String(e.pair || '').toLowerCase()}|${String(e.orderId)}`));
-  const fillRows = allFillRows.filter(e =>
+  const orderDedupedRows = allFillRows.filter(e =>
     !(e.category === 'filled_order' &&
       tradeOrderIds.has(`${String(e.pair || '').toLowerCase()}|${String(e.orderId || '')}`))
   );
+
+  // Live WebSocket and REST history can describe the same execution with different IDs.
+  // Deduplicate only near-identical filled_trade rows: same pair, side, price, amount,
+  // fee/currency and exchange timestamp within 1 second. Prefer the row with converted
+  // fee data so the duplicate lacking a historical price does not win.
+  const fillRows = [];
+  const duplicateTimeMs = e => {
+    const iso = toIsoTimestamp(e.exchangeTime || e.time);
+    const ms = Date.parse(iso || '');
+    return Number.isFinite(ms) ? ms : 0;
+  };
+  const duplicateSignatureMatches = (a, b) => {
+    if (a.category !== 'filled_trade' || b.category !== 'filled_trade') return false;
+    if (String(a.pair || '').toLowerCase() !== String(b.pair || '').toLowerCase()) return false;
+    if (String(a.action || '').toUpperCase() !== String(b.action || '').toUpperCase()) return false;
+    if (Math.abs(Number(a.price) - Number(b.price)) > 1e-10) return false;
+    if (Math.abs(Number(a.amount) - Number(b.amount)) > 1e-8) return false;
+    if (Math.abs(Number(a.fee || 0) - Number(b.fee || 0)) > 1e-10) return false;
+    if (String(a.feeCurrency || '').toUpperCase() !== String(b.feeCurrency || '').toUpperCase()) return false;
+    const ta = duplicateTimeMs(a), tb = duplicateTimeMs(b);
+    return ta > 0 && tb > 0 && Math.abs(ta - tb) <= 1000;
+  };
+  const completeness = e =>
+    (e.feeTwdCost != null ? 4 : 0) +
+    (e.feeBitoTwdPrice != null ? 2 : 0) +
+    (e.tradeId && !String(e.tradeId).includes('|') ? 1 : 0);
+  for (const row of orderDedupedRows) {
+    const duplicateIndex = row.category === 'filled_trade'
+      ? fillRows.findIndex(existing => duplicateSignatureMatches(existing, row))
+      : -1;
+    if (duplicateIndex < 0) {
+      fillRows.push(row);
+    } else if (completeness(row) > completeness(fillRows[duplicateIndex])) {
+      fillRows[duplicateIndex] = row;
+    }
+  }
 
   // Count fills and fee costs on the actual fill date. Missing fee conversion remains
   // unknown (not silently treated as zero).
