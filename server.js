@@ -1069,19 +1069,31 @@ app.get('/api/market-summary/:pair', async (req, res) => {
   if (!validPair(pair) || !PAIRS.includes(pair)) {
     return res.status(400).json({ ok: false, error: '此交易對不在目前支援清單中，請先到策略價差設定加入。' });
   }
+  const now = Math.floor(Date.now() / 1000);
   try {
-    const response = await axios.get(`https://api.bitopro.com/v3/tickers/${pair}`, { timeout: 10000 });
+    const response = await axios.get(`https://api.bitopro.com/v3/trading-history/${pair}`, {
+      params: { resolution: '1m', from: now - 15 * 60, to: now },
+      timeout: 12000
+    });
     const root = response.data?.data ?? response.data;
-    const rows = Array.isArray(root) ? root : (root ? [root] : []);
-    const raw = rows.find(x => String(x.pair || '').toLowerCase() === pair) || rows[0] || {};
+    const rows = Array.isArray(root) ? root : (Array.isArray(root?.candles) ? root.candles : Array.isArray(root?.data) ? root.data : []);
+    const candles = rows.map(x => ({
+      high: Number(x.high ?? x.h),
+      low: Number(x.low ?? x.l),
+      time: Number(x.timestamp ?? x.time ?? x.t)
+    })).filter(x => Number.isFinite(x.high) && Number.isFinite(x.low) && x.high > 0 && x.low > 0);
+    const high = candles.length ? Math.max(...candles.map(x => x.high)) : null;
+    const low = candles.length ? Math.min(...candles.map(x => x.low)) : null;
+    const tickerResponse = await axios.get(`https://api.bitopro.com/v3/tickers/${pair}`, { timeout: 10000 });
+    const tickerRoot = tickerResponse.data?.data ?? tickerResponse.data;
+    const tickerRows = Array.isArray(tickerRoot) ? tickerRoot : (tickerRoot ? [tickerRoot] : []);
+    const raw = tickerRows.find(x => String(x.pair || '').toLowerCase() === pair) || tickerRows[0] || {};
     const lastPrice = Number(raw.lastPrice ?? raw.last_price ?? raw.price ?? raw.close ?? raw.last);
-    const high = Number(raw.high24hr ?? raw.high_24hr ?? raw.high ?? raw.highPrice);
-    const low = Number(raw.low24hr ?? raw.low_24hr ?? raw.low ?? raw.lowPrice);
-    res.json({ ok: true, pair, ticker: {
+    res.json({ ok: true, pair, intervalMinutes: 15, ticker: {
       lastPrice: Number.isFinite(lastPrice) && lastPrice > 0 ? lastPrice : null,
-      high: Number.isFinite(high) && high > 0 ? high : null,
-      low: Number.isFinite(low) && low > 0 ? low : null,
-      rangeDifference: Number.isFinite(high) && Number.isFinite(low) && high > 0 && low > 0 ? high - low : null
+      high, low,
+      rangeDifference: high !== null && low !== null ? high - low : null,
+      candlesCount: candles.length
     }});
   } catch (err) {
     res.status(502).json({ ok: false, error: apiErrorMessage(err) });
