@@ -140,6 +140,15 @@ function apiErrorMessage(err) {
   const data = err.response?.data;
   return typeof data === 'string' ? data : JSON.stringify(data || { message: err.message });
 }
+
+function logOrderConsole(level, label, details = {}) {
+  const timestamp = new Date().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei', hour12: false });
+  const line = `[${timestamp}] [訂單] ${label}`;
+  const output = { ...details };
+  if (level === 'error') console.error(line, output);
+  else if (level === 'warn') console.warn(line, output);
+  else console.log(line, output);
+}
 function addJournal(entry) {
   journal.unshift({ id: crypto.randomUUID(), time: new Date().toISOString(), ...entry });
   journal = journal.slice(0, 10000);
@@ -617,8 +626,9 @@ async function placeCounterOrder(fill) {
   // 最多嘗試兩次。若第一次沒有收到 HTTP 回應（例如逾時），結果可能不確定，
   // 不自動重送以免交易所其實已收單卻造成重複委託。
   for (let attempt = 1; attempt <= 2; attempt++) {
+    const attemptPayload = { ...payload, timestamp: Date.now() };
+    logOrderConsole('info', `反向委託建立中（第 ${attempt}/2 次）`, { pair: fill.pair, action: target.action, amount, price: target.price, timestamp: attemptPayload.timestamp });
     try {
-      const attemptPayload = { ...payload, timestamp: Date.now() };
       const response = await axios.post(
         `https://api.bitopro.com/v3/orders/${fill.pair}`,
         attemptPayload,
@@ -627,19 +637,24 @@ async function placeCounterOrder(fill) {
       const result = response.data?.data ?? response.data;
       const orderId = result?.orderId || result?.id || result?.order_id || null;
       addJournal({ ...entry, live: true, result: 'exchange_accepted', orderId, retryCount: attempt - 1, exchangeResponse: result });
-      emit('info', { message: `交易所已回應反向委託：${fill.pair} ${target.action} ${amount} @ ${target.price}${orderId ? `（訂單 ${orderId}）` : '（未取得訂單 ID，請核對交易所掛單）'}${attempt > 1 ? '（重試成功）' : ''}` });
+      const successMessage = `交易所已回應反向委託：${fill.pair} ${target.action} ${amount} @ ${target.price}${orderId ? `（訂單 ${orderId}）` : '（未取得訂單 ID，請核對交易所掛單）'}${attempt > 1 ? '（重試成功）' : ''}`;
+      logOrderConsole('info', successMessage, { orderId, attempt, exchangeResponse: result });
+      emit('info', { message: successMessage });
       return;
     } catch (err) {
       lastError = err;
+      logOrderConsole('error', `反向委託建立失敗（第 ${attempt}/2 次）`, { pair: fill.pair, action: target.action, amount, price: target.price, httpStatus: err.response?.status || null, error: apiErrorMessage(err), networkError: !err.response });
       if (!err.response) break; // 網路逾時／斷線：無法確認交易所是否已收單，不盲目重送
       if (attempt < 2) {
         emit('warning', { message: `反向委託第 1 次建立失敗，準備重試：${apiErrorMessage(err)}` });
+        logOrderConsole('warn', '反向委託 0.8 秒後準備重試', { pair: fill.pair, httpStatus: err.response?.status || null });
         await new Promise(resolve => setTimeout(resolve, 800));
       }
     }
   }
   const message = lastError ? apiErrorMessage(lastError) : '連線中斷或逾時，無法確認交易所是否已接受委託；請先刷新交易所掛單，避免重複下單。';
   addJournal({ ...entry, live: true, result: 'error', error: message, httpStatus: lastError?.response?.status || null, retryCount: 1 });
+  logOrderConsole('error', '反向委託最終失敗', { pair: fill.pair, action: target.action, amount, price: target.price, httpStatus: lastError?.response?.status || null, error: message });
   emit('error', { message: `反向委託建立失敗：${message}` });
 }
 function processHistoryMessage(raw) {
@@ -1011,12 +1026,16 @@ app.post('/api/orders', async (req, res) => {
         headers: signedOrderHeaders(attemptPayload, true), timeout: 15000
       });
       const result = response.data?.data ?? response.data;
-      addJournal({ category: 'manual_exchange_order', pair, action, price, amount, orderId: result?.orderId || result?.id || null, result: 'exchange_accepted', retryCount: attempt - 1, live: true });
+      const orderId = result?.orderId || result?.id || null;
+      addJournal({ category: 'manual_exchange_order', pair, action, price, amount, orderId, result: 'exchange_accepted', retryCount: attempt - 1, live: true });
+      logOrderConsole('info', `交易所已回應建立手動委託：${pair.toUpperCase()} ${action} ${amount} @ ${price}`, { orderId, attempt, exchangeResponse: result });
       emit('info', { message: `交易所已回應建立委託：${pair.toUpperCase()} ${action} ${amount} @ ${price}${attempt > 1 ? '（重試成功）' : ''}` });
       return res.json({ ok: true, order: result, message: '交易所已回應建立委託；請重新整理交易所掛單確認狀態。' });
     } catch (err) {
       lastError = err;
+      logOrderConsole('error', `手動委託建立失敗（第 ${attempt}/2 次）`, { pair, action, amount, price, httpStatus: err.response?.status || null, error: apiErrorMessage(err), networkError: !err.response });
       if (!err.response || attempt >= 2) break;
+      logOrderConsole('warn', '手動委託 0.8 秒後準備重試', { pair, httpStatus: err.response?.status || null });
       emit('warning', { message: `手動委託第 1 次建立失敗，準備重試：${apiErrorMessage(err)}` });
       await new Promise(resolve => setTimeout(resolve, 800));
     }
@@ -1024,6 +1043,7 @@ app.post('/api/orders', async (req, res) => {
   const message = lastError && !lastError.response
     ? '連線中斷或逾時，無法確認交易所是否已接受委託；請先刷新掛單，避免重複下單。'
     : apiErrorMessage(lastError || new Error('未知錯誤'));
+  logOrderConsole('error', '手動建立委託最終失敗', { pair, action, amount, price, httpStatus: lastError?.response?.status || null, error: message });
   emit('error', { message: `建立委託失敗：${message}` });
   return res.status(lastError?.response?.status || 502).json({ ok: false, error: message });
 });
