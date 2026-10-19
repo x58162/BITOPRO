@@ -125,7 +125,7 @@ async function calibrateApiTime() {
     const finishedAt = Date.now();
     const serverDate = Date.parse(response.headers?.date || '');
     if (!Number.isFinite(serverDate)) {
-      logOrderConsole('warn', 'BitoPro 時間校正未完成：回應沒有有效的 Date 標頭');
+      logSystemConsole('warn', 'BitoPro 時間校正未完成：回應沒有有效的 Date 標頭');
       return { ok: false, error: 'missing_date_header' };
     }
     // 以請求往返的中點估算發出請求時的本機時間，降低網路延遲造成的偏差。
@@ -133,12 +133,12 @@ async function calibrateApiTime() {
     const measuredOffset = Math.round(serverDate - midpoint);
     // 只接受合理範圍內的伺服器時間，避免錯誤標頭導致所有 API timestamp 大幅偏移。
     if (Math.abs(measuredOffset) > 24 * 60 * 60 * 1000) {
-      logOrderConsole('warn', 'BitoPro 時間校正結果超出 24 小時，保留原本時間偏移', { measuredOffsetMs: measuredOffset });
+      logSystemConsole('warn', 'BitoPro 時間校正結果超出 24 小時，保留原本時間偏移', { measuredOffsetMs: measuredOffset });
       return { ok: false, error: 'offset_out_of_range', measuredOffsetMs: measuredOffset };
     }
     apiTimeOffsetMs = measuredOffset;
     apiTimeCalibrationAt = new Date().toISOString();
-    logOrderConsole('info', 'BitoPro API 時間校正完成', {
+    logSystemConsole('info', 'BitoPro API 時間校正完成', {
       offsetMs: apiTimeOffsetMs,
       offsetSeconds: Number((apiTimeOffsetMs / 1000).toFixed(3)),
       roundTripMs: finishedAt - startedAt,
@@ -146,7 +146,7 @@ async function calibrateApiTime() {
     });
     return { ok: true, offsetMs: apiTimeOffsetMs, calibratedAt: apiTimeCalibrationAt };
   } catch (err) {
-    logOrderConsole('warn', 'BitoPro API 時間校正失敗，暫時使用本機時間', {
+    logSystemConsole('warn', 'BitoPro API 時間校正失敗，暫時使用本機時間', {
       error: apiErrorMessage(err),
       httpStatus: err.response?.status || null
     });
@@ -195,6 +195,14 @@ function apiErrorMessage(err) {
 function logOrderConsole(level, label, details = {}) {
   const timestamp = new Date().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei', hour12: false });
   const line = `[${timestamp}] [訂單] ${label}`;
+  const output = { ...details };
+  if (level === 'error') console.error(line, output);
+  else if (level === 'warn') console.warn(line, output);
+  else console.log(line, output);
+}
+function logSystemConsole(level, label, details = {}) {
+  const timestamp = new Date().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei', hour12: false });
+  const line = `[${timestamp}] [系統] ${label}`;
   const output = { ...details };
   if (level === 'error') console.error(line, output);
   else if (level === 'warn') console.warn(line, output);
@@ -669,17 +677,30 @@ async function getMakerSafeCounterPrice(pair, action, originalTargetPrice) {
   return { precision, price: finalPrice, priceText: formatOrderPrice(finalPrice, precision), targetPrice: baseTarget, bestBid, bestAsk, tick };
 }
 async function placeCounterOrder(fill) {
-  if (!PAIRS.includes(fill.pair)) return;
+  if (!PAIRS.includes(fill.pair)) {
+    logOrderConsole('error', '反向委託失敗：交易對不在支援清單', { pair: fill.pair, sourceOrderId: fill.sourceOrderId || null, status: 'FAILED' });
+    emit('error', { message: '反向委託失敗：交易對不在支援清單 ' + fill.pair });
+    return;
+  }
   const target = calculateTarget(fill.pair, fill.price, fill.action);
-  if (!target) { emit('warning', { message: '無法計算反向掛單價格：' + fill.pair }); return; }
+  if (!target) {
+    logOrderConsole('error', '反向委託失敗：無法計算目標價格', { pair: fill.pair, sourceAction: fill.action, sourcePrice: fill.price, spread: SPREADS[fill.pair], status: 'FAILED' });
+    emit('warning', { message: '無法計算反向掛單價格：' + fill.pair });
+    return;
+  }
   const amount = Number(fill.originalAmount || fill.executedAmount || 0);
-  if (!(amount > 0)) return;
+  if (!(amount > 0)) {
+    logOrderConsole('error', '反向委託失敗：成交數量無效', { pair: fill.pair, amount, sourceOrderId: fill.sourceOrderId || null, status: 'FAILED' });
+    emit('error', { message: '反向委託失敗：成交數量無效 ' + fill.pair });
+    return;
+  }
   const originalTargetPrice = Number(target.price);
   const sourceOrderKey = fill.sourceOrderKey || null;
   let lastError = null;
   let lastMakerQuote = null;
   let lastAttempt = 0;
   if (sourceOrderKey && journal.some(entry => entry.category === 'counter_order_signal' && entry.sourceOrderKey === sourceOrderKey)) {
+    logOrderConsole('warn', '反向委託略過：來源訂單已有紀錄（防止重複送單）', { pair: fill.pair, sourceOrderId: fill.sourceOrderId || sourceOrderKey, status: 'SKIPPED_DUPLICATE' });
     emit('warning', { message: '原始訂單 ' + (fill.sourceOrderId || sourceOrderKey) + ' 已有反向委託紀錄，略過重複觸發。' });
     return;
   }
@@ -690,7 +711,7 @@ async function placeCounterOrder(fill) {
     try { lastMakerQuote = await getMakerSafeCounterPrice(fill.pair, target.action, originalTargetPrice); }
     catch (err) {
       lastError = err;
-      logOrderConsole('warn', '取得 Maker 安全價格失敗', { pair: fill.pair, action: target.action, attempt, error: err.message });
+      logOrderConsole('error', '反向委託失敗：取得 Maker 安全價格失敗', { pair: fill.pair, action: target.action, attempt, error: err.message, status: 'FAILED' });
       break;
     }
     const price = lastMakerQuote.price;
@@ -714,7 +735,8 @@ async function placeCounterOrder(fill) {
     }
     if (!credentialsReady()) {
       addJournal({ ...entry, live: false, result: 'error', error: '缺少 BitoPro API 憑證' });
-      emit('error', { message: '自動反向委託未送出：請設定 BITOPRO_API_KEY、BITOPRO_API_SECRET、BITOPRO_EMAIL。' });
+      logOrderConsole('error', '反向委託失敗：缺少 BitoPro API 憑證', { pair: fill.pair, action: target.action, amount, status: 'FAILED' });
+      emit('error', { message: '自動反向委託未送出：請設定 BITOPRO_API_KEY、BITOPRO_API_SECRET、BITOPRO_API_EMAIL。' });
       return;
     }
     const attemptPayload = { ...payload, timestamp: apiTimestamp() };
@@ -725,13 +747,13 @@ async function placeCounterOrder(fill) {
       const orderId = result?.orderId || result?.id || result?.order_id || null;
       addJournal({ ...entry, live: true, result: 'exchange_accepted', orderId, retryCount: attempt - 1, exchangeResponse: result });
       const successMessage = '交易所已回應反向 Maker 委託：' + fill.pair + ' ' + target.action + ' ' + amount + ' @ ' + priceText + (orderId ? '（訂單 ' + orderId + '）' : '（未取得訂單 ID，請核對交易所掛單）') + (attempt > 1 ? '（第 ' + attempt + ' 次重試成功）' : '');
-      logOrderConsole('info', successMessage, { orderId, attempt, exchangeResponse: result });
+      logOrderConsole('info', '建立訂單狀態：成功（交易所已接受）', { pair: fill.pair, action: target.action, amount, price, orderId, attempt, status: 'SUCCESS', exchangeResponse: result });
       emit('info', { message: successMessage });
       return;
     } catch (err) {
       lastError = err;
       const errorText = apiErrorMessage(err);
-      logOrderConsole('error', '反向 Maker 委託建立失敗（第 ' + attempt + '/' + maxAttempts + ' 次）', { pair: fill.pair, action: target.action, amount, targetPrice: lastMakerQuote.targetPrice, price, httpStatus: err.response?.status || null, error: errorText, networkError: !err.response });
+      logOrderConsole('error', '建立訂單狀態：失敗（第 ' + attempt + '/' + maxAttempts + ' 次）', { pair: fill.pair, action: target.action, amount, targetPrice: lastMakerQuote.targetPrice, price, httpStatus: err.response?.status || null, error: errorText, networkError: !err.response, status: 'FAILED' });
       if (!err.response) break;
       const makerRejected = /post.?only|maker|taker|would\s+(?:immediately\s+)?match|cross(?:ed|ing)?\s+(?:the\s+)?book/i.test(errorText) || Number(err.response.status) === 422;
       if (!makerRejected || attempt >= maxAttempts) break;
@@ -742,7 +764,7 @@ async function placeCounterOrder(fill) {
   const message = lastError ? (lastError.response ? apiErrorMessage(lastError) : '連線中斷或逾時，無法確認交易所是否已接受委託；請先刷新掛單，避免重複下單。') : '無法取得最新買賣盤，已停止送單。';
   const failedPrice = lastMakerQuote?.price ?? originalTargetPrice;
   addJournal({ category: 'counter_order_signal', pair: fill.pair, sourceOrderId: fill.sourceOrderId || fill.orderId || null, sourceOrderKey, sourceAction: fill.action, sourcePrice: Number(fill.price), targetPrice: originalTargetPrice, action: target.action, price: failedPrice, amount, spread: SPREADS[fill.pair], live: LIVE_TRADING, result: 'error', error: message, httpStatus: lastError?.response?.status || null, retryCount: Math.max(0, lastAttempt - 1) });
-  logOrderConsole('error', '反向 Maker 委託最終失敗', { pair: fill.pair, action: target.action, amount, targetPrice: originalTargetPrice, price: failedPrice, httpStatus: lastError?.response?.status || null, error: message });
+  logOrderConsole('error', '建立訂單最終狀態：失敗', { pair: fill.pair, action: target.action, amount, targetPrice: originalTargetPrice, price: failedPrice, httpStatus: lastError?.response?.status || null, error: message, status: 'FAILED' });
   emit('error', { message: '反向 Maker 委託建立失敗：' + message });
 }
 function processHistoryMessage(raw) {
