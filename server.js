@@ -369,12 +369,27 @@ async function backfillTradeHistory() {
     const orderId = String(row.orderId || row.orderID || row.order_id || normalized.orderId || '');
     // 若 API 個別回傳未帶 tradeId，仍以交易所訂單、時間、方向、價格、數量組合識別，不直接丟棄。
     const stableTradeKey = tradeId || `${orderId}|${stamp}|${normalized.action}|${normalized.price}|${normalized.amount}`;
-    const duplicateIndex = journal.findIndex(x =>
-      String(x.tradeId || x.matchID || x.dedupeKey || '') === stableTradeKey &&
-      String(x.orderId || '') === orderId &&
-      String(x.pair || '').toLowerCase() === pair.toLowerCase() &&
-      x.category === 'filled_trade'
-    );
+    const tradeStampMs = Date.parse(toIsoTimestamp(stamp) || '');
+    const duplicateIndex = journal.findIndex(x => {
+      if (x.category !== 'filled_trade' || String(x.pair || '').toLowerCase() !== pair.toLowerCase()) return false;
+      const existingTradeId = String(x.tradeId || x.matchID || x.dedupeKey || '');
+      const sameId = existingTradeId === stableTradeKey && String(x.orderId || '') === orderId;
+      if (sameId) return true;
+
+      // Live User Trade Stream and REST history can expose different ID fields for
+      // the same execution. Match the full execution fingerprint before inserting,
+      // so a history backfill enriches the live row instead of creating duplicates.
+      const sameOrder = orderId
+        ? String(x.orderId || '') === orderId
+        : !x.orderId;
+      const sameAction = String(x.action || '').toUpperCase() === normalized.action;
+      const samePrice = Math.abs(Number(x.price) - normalized.price) < 1e-10;
+      const sameAmount = Math.abs(Number(x.amount) - normalized.amount) < 1e-8;
+      const existingStampMs = Date.parse(toIsoTimestamp(x.exchangeTime || '') || '');
+      const sameTime = Number.isFinite(tradeStampMs) && Number.isFinite(existingStampMs)
+        && Math.abs(existingStampMs - tradeStampMs) <= 120000;
+      return sameOrder && sameAction && samePrice && sameAmount && sameTime;
+    });
     const duplicate = duplicateIndex >= 0;
 
     const oldOrderIndex = journal.findIndex(x =>
@@ -406,14 +421,34 @@ async function backfillTradeHistory() {
     };
     if (duplicate) {
       const existing = journal[duplicateIndex];
-      // Only fill missing quote fields; preserve previously verified quote/cost values.
+      let enriched = false;
+      // Prefer verified historical candle data. Fill only missing values so existing
+      // confirmed values are not overwritten by a later, less precise lookup.
       if ((existing.feeBitoTwdPrice == null || existing.feeTwdCost == null) && feeInfo.feeBitoTwdPrice != null) {
         existing.feeBitoTwdPrice = feeInfo.feeBitoTwdPrice;
         existing.feePriceTime = feeInfo.feePriceTime;
         existing.feeTwdCost = feeInfo.feeTwdCost;
         existing.feePriceStatus = feeInfo.feePriceStatus;
-        existing.feeCurrency = feeInfo.feeCurrency || existing.feeCurrency;
-        existing.fee = feeInfo.fee || existing.fee;
+        enriched = true;
+      }
+      if (existing.fee == null || Number(existing.fee) === 0) {
+        existing.fee = feeInfo.fee;
+        enriched = true;
+      }
+      if (!existing.feeCurrency && feeInfo.feeCurrency) {
+        existing.feeCurrency = feeInfo.feeCurrency;
+        enriched = true;
+      }
+      if (!existing.orderId && orderId) {
+        existing.orderId = orderId;
+        enriched = true;
+      }
+      if (!existing.tradeId || String(existing.tradeId).includes('|')) {
+        existing.tradeId = tradeId || stableTradeKey;
+        existing.matchID = tradeId || stableTradeKey;
+        enriched = true;
+      }
+      if (enriched) {
         persist();
         emit('journal', { entry: existing });
         count++;
