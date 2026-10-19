@@ -1068,10 +1068,10 @@ app.post('/api/orders', async (req, res) => {
   if (!Number.isFinite(price) || price <= 0) return res.status(400).json({ ok: false, error: '價格必須大於 0。' });
   if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ ok: false, error: '數量必須大於 0。' });
   if (!['GTC', 'POST_ONLY'].includes(timeInForce)) return res.status(400).json({ ok: false, error: 'timeInForce 僅支援 GTC 或 POST_ONLY。' });
-  const payload = { action, amount: String(amount), price: String(price), timestamp: Date.now(), type: 'LIMIT', timeInForce };
+  const payload = { action, amount: String(amount), price: String(price), timestamp: apiTimestamp(), type: 'LIMIT', timeInForce };
   let lastError = null;
   for (let attempt = 1; attempt <= 2; attempt++) {
-    const attemptPayload = { ...payload, timestamp: Date.now() };
+    const attemptPayload = { ...payload, timestamp: apiTimestamp() };
     try {
       const response = await axios.post(`https://api.bitopro.com/v3/orders/${pair}`, attemptPayload, {
         headers: signedOrderHeaders(attemptPayload, true), timeout: 15000
@@ -1130,12 +1130,12 @@ app.put('/api/orders/:pair/:id', async (req, res) => {
   if (!['GTC', 'POST_ONLY'].includes(timeInForce)) return res.status(400).json({ ok: false, error: 'timeInForce 僅支援 GTC 或 POST_ONLY。' });
   try {
     await axios.delete(`https://api.bitopro.com/v3/orders/${pair}/${encodeURIComponent(id)}`, {
-      headers: signedOrderHeaders({ identity: EMAIL, nonce: Date.now() }), timeout: 15000
+      headers: signedOrderHeaders({ identity: EMAIL, nonce: apiTimestamp() }), timeout: 15000
     });
   } catch (err) {
     return res.status(err.response?.status || 502).json({ ok: false, error: `舊訂單撤銷失敗，未建立新單：${apiErrorMessage(err)}` });
   }
-  const payload = { action, amount: String(amount), price: String(price), timestamp: Date.now(), type: 'LIMIT', timeInForce };
+  const payload = { action, amount: String(amount), price: String(price), timestamp: apiTimestamp(), type: 'LIMIT', timeInForce };
   try {
     const response = await axios.post(`https://api.bitopro.com/v3/orders/${newPair}`, payload, {
       headers: signedOrderHeaders(payload, true), timeout: 15000
