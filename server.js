@@ -1059,13 +1059,20 @@ app.get('/api/market/:pair', async (req, res) => {
   ]);
   const body = requests.map(x => x.status === 'fulfilled' ? (x.value.data?.data ?? x.value.data) : null);
   const tickerRows = Array.isArray(body[0]) ? body[0] : (body[0] ? [body[0]] : []);
-  const rawTicker = tickerRows[0] || {};
+  // /tickers/{pair} 在部分回應格式中仍可能回傳多個交易對，必須取指定 pair。
+  const rawTicker = tickerRows.find(x => String(x.pair || '').toLowerCase() === pair) || tickerRows[0] || {};
+  const lastPrice = Number(rawTicker.lastPrice ?? rawTicker.last_price ?? rawTicker.price ?? rawTicker.close ?? rawTicker.last);
+  const priceChange24hr = Number(rawTicker.priceChange24hr ?? rawTicker.price_change_24hr);
+  // BitoPro 的 priceChange24hr 是「價格差額」，不是百分比；用 24h 前價格換算百分比。
+  const previousPrice = Number.isFinite(lastPrice) && Number.isFinite(priceChange24hr) ? lastPrice - priceChange24hr : NaN;
+  const changeRate = Number.isFinite(previousPrice) && previousPrice !== 0 ? (priceChange24hr / previousPrice) * 100 : null;
   const ticker = {
-    lastPrice: Number(rawTicker.lastPrice ?? rawTicker.last_price ?? rawTicker.price ?? rawTicker.close ?? rawTicker.last) || null,
+    lastPrice: Number.isFinite(lastPrice) && lastPrice !== 0 ? lastPrice : null,
     high: Number(rawTicker.high24hr ?? rawTicker.high_24hr ?? rawTicker.high ?? rawTicker.highPrice) || null,
     low: Number(rawTicker.low24hr ?? rawTicker.low_24hr ?? rawTicker.low ?? rawTicker.lowPrice) || null,
     volume: Number(rawTicker.volume24hr ?? rawTicker.volume_24hr ?? rawTicker.volume ?? rawTicker.baseVolume) || null,
-    changeRate: Number(rawTicker.changeRate ?? rawTicker.change_rate ?? rawTicker.change ?? rawTicker.priceChangePercent) || 0
+    changeRate: Number.isFinite(changeRate) ? changeRate : null,
+    priceChange24hr: Number.isFinite(priceChange24hr) ? priceChange24hr : null
   };
   const bookRoot = body[1] || {};
   const orderBook = {
