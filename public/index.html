@@ -18,7 +18,9 @@ header{padding:22px 26px;border-bottom:1px solid var(--line);display:flex;justif
 footer{color:var(--muted);font-size:12px;text-align:center;padding:4px 0 18px}
 @media(max-width:1000px){.asset-breakdown{grid-template-columns:repeat(2,minmax(0,1fr))}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.twocol{grid-template-columns:1fr}.pairgrid{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:560px){header{padding:17px}.wrap{padding:13px}.grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.card{padding:12px}.metric{font-size:20px}.actions button{flex:1}.event{grid-template-columns:62px 1fr}}
-tr.balance-up td{color:var(--green);background:rgba(22,163,74,.08)}tr.balance-down td{color:var(--red);background:rgba(220,38,38,.08)}</style>
+tr.balance-up td{color:var(--green);background:rgba(22,163,74,.08)}tr.balance-down td{color:var(--red);background:rgba(220,38,38,.08)}
+.market-card{padding:16px}.market-heading{align-items:flex-end}.market-controls{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap}.market-controls label{display:grid;gap:4px;color:var(--muted);font-size:12px}.market-controls select{padding:9px;background:#0b1324;border:1px solid #34445f;border-radius:8px;color:var(--text)}.market-summary{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin:16px 0}.market-summary>div{background:#0d1526;border:1px solid #26334d;border-radius:10px;padding:11px;min-width:0}.market-summary strong{display:block;font-size:17px;margin-top:5px;overflow-wrap:anywhere}.market-layout{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:12px}.market-chart-wrap{position:relative;min-width:0;background:#0b0e14;border:1px solid #26334d;border-radius:10px;overflow:hidden}.market-chart-wrap #marketChart{height:490px;width:100%}.market-status{position:absolute;left:12px;bottom:8px;color:#9eacc7;font-size:11px;pointer-events:none}.market-side{display:grid;grid-template-rows:auto minmax(0,1fr);gap:12px;min-width:0}.market-side section{background:#0d1526;border:1px solid #26334d;border-radius:10px;padding:10px;min-width:0;overflow:hidden}.market-side h3{margin:0 0 10px;font-size:13px;display:flex;justify-content:space-between}.market-side h3 small{color:var(--muted);font-weight:400}.market-table-head,.market-depth-row,.market-trade-row{display:grid;grid-template-columns:1fr .85fr 1fr;gap:6px;font-size:11px;padding:5px 2px}.market-table-head{color:var(--muted);border-bottom:1px solid #26334d}.market-table-head span:nth-child(2),.market-table-head span:nth-child(3),.market-depth-row span:nth-child(2),.market-depth-row span:nth-child(3),.market-trade-row span:nth-child(2),.market-trade-row span:nth-child(3){text-align:right}.market-depth{max-height:160px;overflow:auto}.market-depth-row.ask{color:#ff7185}.market-depth-row.bid{color:#4de0a0}.market-mid-price{text-align:center;font-size:19px;font-weight:800;padding:8px 0;border-top:1px solid #26334d;border-bottom:1px solid #26334d}.market-trades{max-height:235px;overflow:auto}.market-trade-row{border-bottom:1px solid rgba(38,51,77,.55)}.market-trade-row.buy{color:#4de0a0}.market-trade-row.sell{color:#ff7185}.market-footnote{font-size:11px;color:var(--muted);margin-top:10px}.market-depth .empty,.market-trades .empty{padding:12px;font-size:11px}@media(max-width:1000px){.market-layout{grid-template-columns:1fr}.market-side{grid-template-columns:1fr 1fr;align-items:start}.market-chart-wrap #marketChart{height:420px}}@media(max-width:600px){.market-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.market-side{grid-template-columns:1fr}.market-controls{width:100%}.market-controls label{flex:1}.market-chart-wrap #marketChart{height:340px}}
+</style>
 </head>
 <body>
 <header><div class="brand"><div class="logo">B</div><div><h1>BitoPro 套利管理台</h1><p>交易監控・每日紀錄・策略觀察</p></div></div><div class="actions"><a class="btn" href="/api/export.csv">匯出 CSV</a><button onclick="refreshBalance()">更新餘額</button></div></header>
@@ -32,7 +34,18 @@ tr.balance-up td{color:var(--green);background:rgba(22,163,74,.08)}tr.balance-do
 <div class="card"><div class="label">歷史紀錄筆數</div><div class="metric" id="totalRecords">0</div><div class="sub">本機 JSON 紀錄</div></div>
 </section>
 <section class="card"><h2>帳戶餘額</h2><div id="balances" class="tablewrap"><div class="empty">尚未取得餘額</div></div></section>
-<section class="card"><div class="topline"><h2 style="margin:0">交易所真實掛單管理</h2><div class="actions"><label>掛單篩選<select id="orderFilterPair"><option value="">全部交易對</option></select></label><span class="muted" id="orderAutoRefreshStatus">自動同步中（每 10 秒）</span><button class="primary" type="button" onclick="openSpreadSettings()"><span aria-hidden="true">⚙ </span>策略價差設定</button></div></div><div class="notice" style="margin:12px 0">此區會直接呼叫 BitoPro API。新增會建立真實委託；刪除會撤銷交易所掛單；修改會先撤銷舊單再建立新單（不是原子操作）。請確認交易對、方向、價格、數量後再操作。</div><form id="exchangeOrderForm" class="orderform" onsubmit="submitExchangeOrder(event)"><label>交易對<select id="orderPair"></select></label><label>方向<select id="orderAction"><option value="BUY">BUY 買入</option><option value="SELL">SELL 賣出</option></select></label><label>價格<input id="orderPrice" type="number" min="0.00000001" step="any" required></label><label>數量<input id="orderAmount" type="number" min="0.00000001" step="any" required></label><label>委託條件<select id="orderTif"><option value="POST_ONLY">POST_ONLY（只掛 Maker）</option><option value="GTC">GTC</option></select></label><div class="actions"><button class="primary" type="submit">確認建立真實委託</button></div></form><p class="orderhint" id="orderStatus">掛單列表尚未載入。需要 .env 中的 API Key、Secret、Email，且 API Key 必須有交易及撤單權限。</p><div class="tablewrap"><table><thead><tr><th>建立／更新時間</th><th>訂單 ID</th><th>交易對</th><th>方向</th><th>價格</th><th>原始數量</th><th>已成交</th><th>剩餘</th><th>操作</th></tr></thead><tbody id="exchangeOrdersBody"><tr><td colspan="9" class="empty">正在自動讀取交易所掛單…</td></tr></tbody></table></div></section>
+
+<section class="card market-card">
+  <div class="topline market-heading"><div><h2 style="margin:0">即時行情交易</h2><div class="sub">公開行情資料 · 不會因查看圖表而送出委託</div></div>
+    <div class="market-controls"><label>交易對<select id="marketPair"></select></label><label>K 線週期<select id="marketResolution"><option value="1m">1 分</option><option value="5m">5 分</option><option value="15m">15 分</option><option value="30m">30 分</option><option value="1h">1 小時</option><option value="4h">4 小時</option><option value="1d" selected>1 天</option></select></label><button type="button" onclick="loadMarket(true)">更新行情</button></div>
+  </div>
+  <div class="market-summary"><div><span class="label">最新價格</span><strong id="marketLastPrice">—</strong></div><div><span class="label">24 小時漲跌</span><strong id="marketChange">—</strong></div><div><span class="label">24 小時最高</span><strong id="marketHigh">—</strong></div><div><span class="label">24 小時最低</span><strong id="marketLow">—</strong></div><div><span class="label">24 小時成交量</span><strong id="marketVolume">—</strong></div></div>
+  <div class="market-layout"><div class="market-chart-wrap"><div id="marketChart" aria-label="K 線圖"></div><div id="marketChartStatus" class="market-status">正在載入行情…</div></div>
+    <div class="market-side"><section><h3>掛單簿 <small id="marketBookPair"></small></h3><div class="market-table-head"><span>價格</span><span>數量</span><span>金額</span></div><div id="marketAsks" class="market-depth asks"><div class="empty">載入中…</div></div><div class="market-mid-price" id="marketBookLast">—</div><div id="marketBids" class="market-depth bids"><div class="empty">載入中…</div></div></section>
+    <section class="market-trades-section"><h3>最新成交</h3><div class="market-table-head"><span>價格</span><span>數量</span><span>時間</span></div><div id="marketTrades" class="market-trades"><div class="empty">載入中…</div></div></section></div>
+  </div><div class="market-footnote" id="marketUpdatedAt">行情尚未更新</div>
+</section>
+\n<section class="card"><div class="topline"><h2 style="margin:0">交易所真實掛單管理</h2><div class="actions"><label>掛單篩選<select id="orderFilterPair"><option value="">全部交易對</option></select></label><span class="muted" id="orderAutoRefreshStatus">自動同步中（每 10 秒）</span><button class="primary" type="button" onclick="openSpreadSettings()"><span aria-hidden="true">⚙ </span>策略價差設定</button></div></div><div class="notice" style="margin:12px 0">此區會直接呼叫 BitoPro API。新增會建立真實委託；刪除會撤銷交易所掛單；修改會先撤銷舊單再建立新單（不是原子操作）。請確認交易對、方向、價格、數量後再操作。</div><form id="exchangeOrderForm" class="orderform" onsubmit="submitExchangeOrder(event)"><label>交易對<select id="orderPair"></select></label><label>方向<select id="orderAction"><option value="BUY">BUY 買入</option><option value="SELL">SELL 賣出</option></select></label><label>價格<input id="orderPrice" type="number" min="0.00000001" step="any" required></label><label>數量<input id="orderAmount" type="number" min="0.00000001" step="any" required></label><label>委託條件<select id="orderTif"><option value="POST_ONLY">POST_ONLY（只掛 Maker）</option><option value="GTC">GTC</option></select></label><div class="actions"><button class="primary" type="submit">確認建立真實委託</button></div></form><p class="orderhint" id="orderStatus">掛單列表尚未載入。需要 .env 中的 API Key、Secret、Email，且 API Key 必須有交易及撤單權限。</p><div class="tablewrap"><table><thead><tr><th>建立／更新時間</th><th>訂單 ID</th><th>交易對</th><th>方向</th><th>價格</th><th>原始數量</th><th>已成交</th><th>剩餘</th><th>操作</th></tr></thead><tbody id="exchangeOrdersBody"><tr><td colspan="9" class="empty">正在自動讀取交易所掛單…</td></tr></tbody></table></div></section>
 <section class="card"><h2>每日統計</h2><div class="tablewrap"><table><thead><tr><th>日期</th><th>完整成交</th><th>反向訊號</th><th>已送出</th><th>失敗</th><th>獲利（已配對毛利）</th><th>已換算手續費</th><th>待換算筆數</th><th>估算淨價差</th></tr></thead><tbody id="dailyBody"></tbody></table></div></section>
 <div class="twocol">
 <section class="card"><div class="topline"><h2 style="margin:0">最近交易／策略紀錄</h2></div><div class="notice" style="margin:12px 0">僅顯示 2026/10/18 起的成交紀錄；更早紀錄保留在資料檔中供歷史配對統計使用。</div><div class="tablewrap"><table><thead><tr><th>時間</th><th>類型</th><th>交易對</th><th>方向</th><th>價格</th><th>成交數量</th><th>手續費</th><th>BITO/TWD 成交分鐘參考價</th><th>手續費台幣成本</th><th>結果</th></tr></thead><tbody id="journalBody"></tbody></table></div></section>
@@ -40,7 +53,7 @@ tr.balance-up td{color:var(--green);background:rgba(22,163,74,.08)}tr.balance-do
 </div>
 <div id="spreadSettingsOverlay" class="settings-overlay" role="dialog" aria-modal="true" aria-labelledby="spreadSettingsTitle" onclick="if(event.target===this)closeSpreadSettings()"><div class="settings-modal"><div class="settings-modal-head"><h2 id="spreadSettingsTitle">策略價差設定</h2><button type="button" onclick="closeSpreadSettings()" aria-label="關閉設定">關閉 ✕</button></div><p class="sub">依報價幣別分組：TWD 價差以台幣計；USDT 價差以 USDT 計。新增前請確認交易所確實支援該交易對。</p><div class="add-pair-form"><input id="newPair" placeholder="交易對，例如 ada_twd、eth_usdt"><input id="newSpread" type="number" min="0" step="any" value="0" placeholder="初始價差" aria-label="新增交易對初始價差"><button class="primary" onclick="addPair()">新增交易對</button></div><div id="spreads"></div><div class="spread-actions"><button class="primary" onclick="saveSpreads()">儲存價差設定</button><button onclick="resetSpreadInputs()">重新載入目前設定</button><span class="spread-help" id="spreadStatus">修改後按「儲存價差設定」才會生效。</span></div><p class="sub">價差單位與交易對報價幣別一致。新設定會套用於之後產生的反向掛單訊號，不會修改交易所已存在的掛單。請先在模擬模式驗證。</p></div></div><div id="editOrderOverlay" class="edit-order-overlay" role="dialog" aria-modal="true" aria-labelledby="editOrderTitle" onclick="if(event.target===this)closeEditOrderModal()"><div class="edit-order-modal"><h2 id="editOrderTitle">修改真實掛單</h2><p class="sub">可同時修改交易對、方向、價格、數量與委託條件。委託金額會依「價格 × 數量」同步計算；也可以輸入委託金額反算數量。</p><form id="editOrderForm" onsubmit="submitEditOrder(event)"><div class="edit-order-grid"><label>交易對<select id="editOrderPair" required></select></label><label>方向<select id="editOrderAction"><option value="BUY">BUY 買入</option><option value="SELL">SELL 賣出</option></select></label><label>價格<input id="editOrderPrice" type="number" min="0.00000001" step="any" required></label><label>數量（基礎幣）<input id="editOrderAmount" type="number" min="0.00000001" step="any" required></label><label class="full">委託金額（報價幣）<input id="editOrderTotal" type="number" min="0.00000001" step="any" required><span class="sub">修改金額會依目前價格自動換算數量；修改數量則會重新計算金額。</span></label><label class="full">委託條件<select id="editOrderTif"><option value="POST_ONLY">POST_ONLY（只掛 Maker）</option><option value="GTC">GTC</option></select></label></div><div class="notice" style="margin-top:14px">真實修改會先撤銷舊單，再建立新單，並非原子操作。若新單建立失敗，舊單不會自動恢復。</div><div id="editOrderError" class="orderhint"></div><div class="edit-order-actions"><button type="button" onclick="closeEditOrderModal()">取消</button><button class="primary" type="submit">確認修改真實委託</button></div></form></div></div><footer>資料保存在此電腦的 data/journal.json。網站統計是交易紀錄工具，不保證套利獲利；請先以模擬模式驗證。</footer>
 </main>
-<script>
+<script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"></script>\n<script>
 let state = {};
 const $ = id => document.getElementById(id);
 const fmt = (n, digits=4) => Number(n||0).toLocaleString('zh-TW',{maximumFractionDigits:digits});
@@ -86,7 +99,61 @@ function getBalanceBaselines(rows) {
   return baselines;
 }
 
-function render(){
+
+let marketChart=null, marketCandleSeries=null, marketVolumeSeries=null, marketLoadBusy=false, marketLastLoadedAt=0;
+const marketFormat=(value,digits=8)=>Number.isFinite(Number(value))?Number(value).toLocaleString('zh-TW',{maximumFractionDigits:digits}):'—';
+function initMarketChart(){
+  if(marketChart||!window.LightweightCharts||!$('marketChart'))return;
+  const el=$('marketChart');
+  marketChart=LightweightCharts.createChart(el,{width:el.clientWidth||800,height:el.clientHeight||490,layout:{background:{type:'solid',color:'#0b0e14'},textColor:'#aeb8c8'},grid:{vertLines:{color:'#202631'},horzLines:{color:'#202631'}},rightPriceScale:{borderColor:'#303744'},timeScale:{borderColor:'#303744',timeVisible:true,secondsVisible:false},crosshair:{mode:LightweightCharts.CrosshairMode.Normal}});
+  marketCandleSeries=marketChart.addCandlestickSeries({upColor:'#0ecb81',downColor:'#f6465d',borderUpColor:'#0ecb81',borderDownColor:'#f6465d',wickUpColor:'#0ecb81',wickDownColor:'#f6465d',priceLineVisible:true});
+  marketVolumeSeries=marketChart.addHistogramSeries({priceFormat:{type:'volume'},priceScaleId:'volume',scaleMargins:{top:.82,bottom:0},lastValueVisible:false,priceLineVisible:false});
+  marketChart.timeScale().fitContent();
+  if(window.ResizeObserver){new ResizeObserver(()=>{if(marketChart&&el.clientWidth)marketChart.applyOptions({width:el.clientWidth,height:el.clientHeight||490});}).observe(el);}
+}
+function renderMarketDepth(rows,target,side){
+  const data=Array.isArray(rows)?rows:[];
+  target.innerHTML=data.slice(0,12).map(x=>{const price=Number(x.price),amount=Number(x.amount??x.volume??x.quantity);return Number.isFinite(price)&&Number.isFinite(amount)?'<div class="market-depth-row '+side+'"><span>'+marketFormat(price,8)+'</span><span>'+marketFormat(amount,8)+'</span><span>'+marketFormat(price*amount,4)+'</span></div>':''}).join('')||'<div class="empty">目前沒有掛單資料</div>';
+}
+async function loadMarket(manual=false){
+  if(marketLoadBusy)return;
+  marketLoadBusy=true;
+  const pair=$('marketPair')?.value||Object.keys(state.spreads||{})[0]||'bnb_twd';
+  const resolution=$('marketResolution')?.value||'1d';
+  $('marketChartStatus').textContent='正在更新 '+pair.toUpperCase()+'…';
+  try{
+    const d=await api('/api/market/'+encodeURIComponent(pair)+'?resolution='+encodeURIComponent(resolution));
+    initMarketChart();
+    const candles=(d.candles||[]).map(x=>({time:Number(x.time),open:Number(x.open),high:Number(x.high),low:Number(x.low),close:Number(x.close)})).filter(x=>x.time>0&&[x.open,x.high,x.low,x.close].every(Number.isFinite)).sort((a,b)=>a.time-b.time);
+    const unique=[];for(const c of candles){if(unique.length&&unique[unique.length-1].time===c.time)unique[unique.length-1]=c;else unique.push(c);}
+    if(marketCandleSeries&&unique.length){marketCandleSeries.setData(unique);marketVolumeSeries.setData((d.candles||[]).map(x=>({time:Number(x.time),value:Number(x.volume)||0,color:Number(x.close)>=Number(x.open)?'rgba(14,203,129,.35)':'rgba(246,70,93,.35)'})).filter(x=>x.time>0).sort((a,b)=>a.time-b.time));marketChart.timeScale().fitContent();}
+    const t=d.ticker||{};
+    $('marketLastPrice').textContent=marketFormat(t.lastPrice,8);
+    const change=Number(t.changeRate??t.change??NaN);
+    $('marketChange').textContent=Number.isFinite(change)?(change>0?'+':'')+marketFormat(change,4)+'%':'—';
+    $('marketChange').className=Number.isFinite(change)&&change<0?'red':'green';
+    $('marketHigh').textContent=marketFormat(t.high,8);$('marketLow').textContent=marketFormat(t.low,8);$('marketVolume').textContent=marketFormat(t.volume,6);
+    $('marketBookPair').textContent=pair.toUpperCase();$('marketBookLast').textContent=marketFormat(t.lastPrice,8);
+    renderMarketDepth(d.orderBook?.asks,$('marketAsks'),'ask');
+    renderMarketDepth(d.orderBook?.bids,$('marketBids'),'bid');
+    const trades=Array.isArray(d.trades)?d.trades:[];
+    $('marketTrades').innerHTML=trades.slice(0,35).map(x=>{const action=String(x.action||x.side||'').toUpperCase();const isBuy=['BUY','BID'].includes(action);const price=Number(x.price??x.matchPrice),amount=Number(x.amount??x.baseAmount??x.volume);const rawTime=Number(x.timestamp??x.createdTimestamp??x.time);const ts=rawTime?(rawTime<1e12?rawTime*1000:rawTime):Date.parse(x.createdAt||'');return '<div class="market-trade-row '+(isBuy?'buy':'sell')+'"><span>'+marketFormat(price,8)+'</span><span>'+marketFormat(amount,6)+'</span><span>'+ (Number.isFinite(ts)?new Date(ts).toLocaleTimeString('zh-TW',{hour12:false}):'—')+'</span></div>'}).join('')||'<div class="empty">暫無成交資料</div>';
+    $('marketChartStatus').textContent=unique.length?'K 線 '+unique.length+' 根 · '+resolution:'此週期暫無 K 線資料';
+    $('marketUpdatedAt').textContent='最後更新：'+new Date().toLocaleString('zh-TW')+' · 行情為公開 API 資料';
+    marketLastLoadedAt=Date.now();
+  }catch(e){$('marketChartStatus').textContent='行情讀取失敗：'+e.message;if(!marketLastLoadedAt){$('marketAsks').innerHTML='<div class="empty">行情 API 暫時無法取得資料</div>';$('marketBids').innerHTML='<div class="empty">行情 API 暫時無法取得資料</div>';$('marketTrades').innerHTML='<div class="empty">行情 API 暫時無法取得資料</div>';}}
+  finally{marketLoadBusy=false;}
+}
+function initMarketPairs(){
+  const sel=$('marketPair');if(!sel)return;
+  const pairs=Object.keys(state.spreads||{});const previous=sel.value;
+  sel.innerHTML=pairs.map(p=>'<option value="'+esc(p)+'">'+esc(p.toUpperCase().replace('_',' / '))+'</option>').join('');
+  if(pairs.includes(previous))sel.value=previous;
+  else if(pairs.includes('bnb_twd'))sel.value='bnb_twd';
+}
+$('marketPair')?.addEventListener('change',()=>loadMarket(true));
+$('marketResolution')?.addEventListener('change',()=>loadMarket(true));
+\nfunction render(){
  const s=state.status||{};const dot=$('statusDot');if(dot)dot.className='dot '+(s.state==='connected'?'green':(['error','needs_config'].includes(s.state)?'red':''));
  const statusText=$('statusText');if(statusText)statusText.textContent=(s.message||'未知')+(state.liveTrading?' · 實盤模式':' · 模擬模式');
  const today=new Date().toLocaleDateString('sv-SE');const d=(state.daily||[]).find(x=>x.date===today)||{};
@@ -97,7 +164,7 @@ function render(){
  const b=allBalances.filter(x=>Math.abs(Number(x.amount||0))>1e-12 && x.twdValue!=null && Number.isFinite(Number(x.twdValue)));
  if ($('balances')) $('balances').innerHTML=b.length?`<table><thead><tr><th>幣別</th><th>總額</th><th>可用</th><th>估算台幣價值</th><th>與起始數量差額</th></tr></thead><tbody>${b.map(x=>{const currency=String(x.currency||'').toUpperCase();const baseline=Number(balanceBaselines[currency]);const current=Number(x.amount||0);const delta=Number.isFinite(baseline)?current-baseline:null;const cls=delta!==null?(delta>1e-12?'balance-up':delta< -1e-12?'balance-down':''):'';const deltaText=delta===null?'—':(delta>1e-12?'+':'')+fmt(delta,8);return `<tr class="${cls}"><td><b>${esc(x.currency)}</b></td><td>${fmt(x.amount,8)}</td><td>${fmt(x.available,8)}</td><td>NT$ ${fmt(x.twdValue,2)}</td><td>${deltaText}</td></tr>`}).join('')}</tbody></table>`:'<div class="empty">目前沒有有餘額且具台幣報價的資產</div>';
  const spreadEntries=Object.entries(state.spreads||{});const groups={};for(const [p,v] of spreadEntries){const quote=p.split('_')[1]?.toUpperCase()||'其他';(groups[quote] ||= []).push([p,v]);}const quoteOrder=['TWD','USDT','USDC','BTC','ETH'];const quotes=[...quoteOrder.filter(q=>groups[q]),...Object.keys(groups).filter(q=>!quoteOrder.includes(q)).sort()];if ($('spreads')) $('spreads').innerHTML=quotes.map(q=>`<div class="quote-group"><h3 class="quote-title">${esc(q)} 報價 · 價差單位：${esc(q)}</h3><div class="pairgrid">${groups[q].map(([p,v])=>`<div class="pair"><div class="pair-head"><strong>${esc(p.toUpperCase())}</strong><button class="remove-pair" onclick="removePair('${esc(p)}')" title="移除此交易對">移除</button></div><input class="spread-input" type="number" min="0" step="any" id="spread-${esc(p)}" value="${esc(v)}" aria-label="${esc(p)} 價差"></div>`).join('')}</div></div>`).join('');
- initOrderPairSelect();
+ initOrderPairSelect();\n initMarketPairs();
  if ($('dailyBody')) $('dailyBody').innerHTML=(state.daily||[]).length?(state.daily||[]).map(x=>`<tr><td>${esc(x.date)}</td><td>${x.fills}</td><td>${x.signals}</td><td>${x.submitted}</td><td>${x.failed}</td><td>${money(x.estimatedGross)}</td><td>${money(x.estimatedFees)}</td><td class="${Number(x.feePending||0)>0?'red':'green'}">${Number(x.feePending||0)}</td><td class="${x.estimatedNet>=0?'green':'red'}">${money(x.estimatedNet)}</td></tr>`).join(''):'<tr><td colspan="9" class="empty">尚無資料</td></tr>';
  const journalSource=(state.journal||[]); const tradeOrderKeys=new Set(journalSource.filter(x=>x.category==='filled_trade'&&x.orderId!=null).map(x=>String(x.pair||'').toLowerCase()+'|'+String(x.orderId))); const cutoff18=Date.parse('2026-10-17T16:00:00.000Z'); const tradeTimeMs=(value)=>{if(value==null||value==='')return 0;if(typeof value==='number'||(/^\d{10,13}$/.test(String(value)))){const n=Number(value);return Number.isFinite(n)?(n<1e12?n*1000:n):0;}const n=Date.parse(value);return Number.isFinite(n)?n:0;}; const rawFilledRows=journalSource.filter(x=>(x.category==='filled_trade'||(x.category==='filled_order'&&!tradeOrderKeys.has(String(x.pair||'').toLowerCase()+'|'+String(x.orderId||'')))) && tradeTimeMs(x.exchangeTime||x.time)>=cutoff18);
  const rowCompleteness=x=>(x.feeTwdCost!=null?4:0)+(x.feeBitoTwdPrice!=null?2:0)+(x.fee!=null&&Number(x.fee)>0?1:0)+(x.tradeId&&!String(x.tradeId).includes('|')?1:0);
@@ -237,7 +304,7 @@ async function submitEditOrder(ev){
   finally{if(submitBtn)submitBtn.disabled=false;}
 }
 
-load();connectLive();
+load();connectLive();\nsetTimeout(()=>{initMarketChart();loadMarket();},500);\nsetInterval(()=>loadMarket(),15000);
 // 掛單由伺服器自動同步，不再要求使用者手動按重新整理。
 loadExchangeOrders();
 setInterval(()=>loadExchangeOrders({silent:true}),10000);
