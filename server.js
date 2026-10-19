@@ -347,8 +347,19 @@ async function recordUserTrade(raw, fallbackPair = '', isHistorical = false, fal
     ...feeInfo, result: 'filled'
   };
   addJournal(entry);
-  // 實際新成交後才更新一次帳戶餘額；歷史回補不觸發，避免連續呼叫 API。
+
+  // 即時成交才觸發反向委託；歷史補登只補紀錄，絕不因回補舊成交而突然送出新訂單。
+  // 使用本次實際成交數量，不使用原始掛單總量，避免部分成交時反向下單過量。
   if (!isHistorical) {
+    placeCounterOrder({
+      pair: trade.pair,
+      action: trade.action,
+      price: trade.price,
+      executedAmount: trade.amount,
+      originalAmount: trade.amount
+    }).catch(err => emit('error', { message: `成交已記錄，但觸發反向委託時發生錯誤：${apiErrorMessage(err)}` }));
+    
+    // 實際新成交後才更新一次帳戶餘額；歷史回補不觸發，避免連續呼叫 API。
     getAccountBalance().catch(err => emit('error', { message: `成交已記錄，但成交後更新帳戶資產失敗：${apiErrorMessage(err)}` }));
   }
   if (!isHistorical && feeInfo.feeCurrency === 'BITO' && feeInfo.feeTwdCost != null) {
