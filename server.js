@@ -616,103 +616,134 @@ function calculateTarget(pair, sourcePrice, sourceAction) {
   if (!Number.isFinite(price) || price <= 0) return null;
   return { action: sourceAction === 'BUY' ? 'SELL' : 'BUY', price: String(price.toFixed(8)).replace(/0+$/, '').replace(/\.$/, '') };
 }
+const pairPricePrecisionCache = new Map();
+async function getPairPricePrecision(pair) {
+  const cached = pairPricePrecisionCache.get(pair);
+  if (cached && Date.now() - cached.at < 10 * 60 * 1000) return cached.precision;
+  const response = await axios.get('https://api.bitopro.com/v3/provisioning/trading-pairs', { timeout: 8000 });
+  const root = response.data?.data ?? response.data;
+  const rows = Array.isArray(root) ? root : [];
+  const info = rows.find(item => String(item.pair || '').toLowerCase() === pair);
+  const precision = Number(info?.quotePrecision);
+  if (!Number.isInteger(precision) || precision < 0 || precision > 12) {
+    throw new Error('無法取得 ' + pair.toUpperCase() + ' 的有效 quotePrecision，為避免價格不符合交易所規則，停止自動掛單。');
+  }
+  pairPricePrecisionCache.set(pair, { precision, at: Date.now() });
+  return precision;
+}
+function roundPriceToPrecision(value, precision, mode) {
+  const factor = 10 ** precision;
+  const scaled = value * factor;
+  const epsilon = 1e-9;
+  const rounded = mode === 'ceil' ? Math.ceil(scaled - epsilon) : Math.floor(scaled + epsilon);
+  return rounded / factor;
+}
+function formatOrderPrice(value, precision) {
+  return value.toFixed(precision).replace(/\.?0+$/, '');
+}
+async function getMakerSafeCounterPrice(pair, action, originalTargetPrice) {
+  const results = await Promise.all([
+    getPairPricePrecision(pair),
+    axios.get('https://api.bitopro.com/v3/order-book/' + pair, { params: { limit: 5 }, timeout: 8000 })
+  ]);
+  const precision = results[0];
+  const book = results[1].data?.data ?? results[1].data;
+  const bids = Array.isArray(book?.bids) ? book.bids.map(row => Number(row.price)).filter(price => price > 0) : [];
+  const asks = Array.isArray(book?.asks) ? book.asks.map(row => Number(row.price)).filter(price => price > 0) : [];
+  if (!bids.length || !asks.length) throw new Error('無法取得 ' + pair.toUpperCase() + ' 完整買賣盤，為避免誤成 Taker，暫停掛單。');
+  const bestBid = Math.max(...bids);
+  const bestAsk = Math.min(...asks);
+  if (!(bestAsk > bestBid)) throw new Error('目前 ' + pair.toUpperCase() + ' 買賣盤異常（買一 ' + bestBid + '、賣一 ' + bestAsk + '），暫停掛單。');
+  const tick = 10 ** -precision;
+  const baseTarget = action === 'SELL'
+    ? roundPriceToPrecision(originalTargetPrice, precision, 'ceil')
+    : roundPriceToPrecision(originalTargetPrice, precision, 'floor');
+  // SELL 必須高於買一；BUY 必須低於賣一。調整價格只能朝策略有利方向。
+  const makerBoundary = action === 'SELL' ? bestBid + tick : bestAsk - tick;
+  const finalPrice = action === 'SELL'
+    ? Math.max(baseTarget, roundPriceToPrecision(makerBoundary, precision, 'ceil'))
+    : Math.min(baseTarget, roundPriceToPrecision(makerBoundary, precision, 'floor'));
+  if (!(finalPrice > 0)) throw new Error('計算出的 Maker 價格無效：' + pair.toUpperCase() + ' ' + action + ' ' + finalPrice);
+  if (action === 'SELL' && finalPrice + 1e-12 < baseTarget) throw new Error('賣價低於原定最低賣價，已阻止掛單。');
+  if (action === 'BUY' && finalPrice - 1e-12 > baseTarget) throw new Error('買價高於原定最高買價，已阻止掛單。');
+  return { precision, price: finalPrice, priceText: formatOrderPrice(finalPrice, precision), targetPrice: baseTarget, bestBid, bestAsk, tick };
+}
 async function placeCounterOrder(fill) {
   if (!PAIRS.includes(fill.pair)) return;
   const target = calculateTarget(fill.pair, fill.price, fill.action);
-  if (!target) {
-    emit('warning', { message: `無法計算反向掛單價格：${fill.pair}` });
-    return;
-  }
+  if (!target) { emit('warning', { message: '無法計算反向掛單價格：' + fill.pair }); return; }
   const amount = Number(fill.originalAmount || fill.executedAmount || 0);
   if (!(amount > 0)) return;
-
-  const estimatedGross = Math.abs(Number(target.price) - Number(fill.price)) * amount;
-  const estimatedFee = (Math.abs(Number(fill.price) * amount) + Math.abs(Number(target.price) * amount)) * FEE_RATE;
-  const entry = {
-    category: 'counter_order_signal',
-    pair: fill.pair,
-    sourceOrderId: fill.sourceOrderId || fill.orderId || null,
-    sourceOrderKey: fill.sourceOrderKey || null,
-    sourceAction: fill.action,
-    sourcePrice: Number(fill.price),
-    action: target.action,
-    price: Number(target.price),
-    amount,
-    spread: SPREADS[fill.pair],
-    estimatedGross,
-    estimatedFee,
-    estimatedNet: estimatedGross - estimatedFee,
-    live: LIVE_TRADING,
-    result: LIVE_TRADING ? 'pending' : 'dry_run'
-  };
-
-  const payload = {
-    action: target.action,
-    amount: String(amount),
-    price: String(target.price),
-    timestamp: apiTimestamp(),
-    type: 'LIMIT',
-    timeInForce: 'POST_ONLY'
-  };
-
-  if (!LIVE_TRADING) {
-    addJournal({
-      ...entry,
-      live: false,
-      result: 'dry_run',
-      requestPreview: {
-        method: 'POST',
-        path: `/v3/orders/${fill.pair}`,
-        payload,
-        note: 'LIVE_TRADING=false：只預覽，不會送出交易所委託'
-      }
-    });
-    emit('dryrun', {
-      message: `反向委託預覽（未送單）：${fill.pair} ${target.action} ${amount} @ ${target.price}`
-    });
-    return;
-  }
-
-  if (!credentialsReady()) {
-    addJournal({ ...entry, live: false, result: 'error', error: '缺少 BitoPro API 憑證' });
-    emit('error', { message: '自動反向委託未送出：請設定 BITOPRO_API_KEY、BITOPRO_API_SECRET、BITOPRO_EMAIL。' });
-    return;
-  }
-
+  const originalTargetPrice = Number(target.price);
+  const sourceOrderKey = fill.sourceOrderKey || null;
   let lastError = null;
-  // 最多嘗試兩次。若第一次沒有收到 HTTP 回應（例如逾時），結果可能不確定，
-  // 不自動重送以免交易所其實已收單卻造成重複委託。
-  for (let attempt = 1; attempt <= 2; attempt++) {
+  let lastMakerQuote = null;
+  let lastAttempt = 0;
+  if (sourceOrderKey && journal.some(entry => entry.category === 'counter_order_signal' && entry.sourceOrderKey === sourceOrderKey)) {
+    emit('warning', { message: '原始訂單 ' + (fill.sourceOrderId || sourceOrderKey) + ' 已有反向委託紀錄，略過重複觸發。' });
+    return;
+  }
+  // 每次 POST_ONLY 拒絕後重新讀取買賣盤並重算；網路逾時不盲目重送。
+  const maxAttempts = LIVE_TRADING ? 3 : 1;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    lastAttempt = attempt;
+    try { lastMakerQuote = await getMakerSafeCounterPrice(fill.pair, target.action, originalTargetPrice); }
+    catch (err) {
+      lastError = err;
+      logOrderConsole('warn', '取得 Maker 安全價格失敗', { pair: fill.pair, action: target.action, attempt, error: err.message });
+      break;
+    }
+    const price = lastMakerQuote.price;
+    const priceText = lastMakerQuote.priceText;
+    const estimatedGross = Math.abs(price - Number(fill.price)) * amount;
+    const estimatedFee = (Math.abs(Number(fill.price) * amount) + Math.abs(price * amount)) * FEE_RATE;
+    const entry = {
+      category: 'counter_order_signal', pair: fill.pair,
+      sourceOrderId: fill.sourceOrderId || fill.orderId || null, sourceOrderKey,
+      sourceAction: fill.action, sourcePrice: Number(fill.price), targetPrice: lastMakerQuote.targetPrice,
+      action: target.action, price, amount, spread: SPREADS[fill.pair],
+      bestBidAtSubmit: lastMakerQuote.bestBid, bestAskAtSubmit: lastMakerQuote.bestAsk, priceTick: lastMakerQuote.tick,
+      estimatedGross, estimatedFee, estimatedNet: estimatedGross - estimatedFee,
+      live: LIVE_TRADING, result: LIVE_TRADING ? 'pending' : 'dry_run'
+    };
+    const payload = { action: target.action, amount: String(amount), price: priceText, timestamp: apiTimestamp(), type: 'LIMIT', timeInForce: 'POST_ONLY' };
+    if (!LIVE_TRADING) {
+      addJournal({ ...entry, live: false, result: 'dry_run', requestPreview: { method: 'POST', path: '/v3/orders/' + fill.pair, payload, note: 'LIVE_TRADING=false：只預覽，不會送出交易所委託；價格已依最新買賣盤計算為 Maker 安全價' } });
+      emit('dryrun', { message: '反向委託預覽（未送單）：' + fill.pair + ' ' + target.action + ' ' + amount + ' @ ' + priceText + '；原目標價 ' + formatOrderPrice(lastMakerQuote.targetPrice, lastMakerQuote.precision) });
+      return;
+    }
+    if (!credentialsReady()) {
+      addJournal({ ...entry, live: false, result: 'error', error: '缺少 BitoPro API 憑證' });
+      emit('error', { message: '自動反向委託未送出：請設定 BITOPRO_API_KEY、BITOPRO_API_SECRET、BITOPRO_EMAIL。' });
+      return;
+    }
     const attemptPayload = { ...payload, timestamp: apiTimestamp() };
-    logOrderConsole('info', `反向委託建立中（第 ${attempt}/2 次）`, { pair: fill.pair, action: target.action, amount, price: target.price, timestamp: attemptPayload.timestamp });
+    logOrderConsole('info', '反向 Maker 委託建立中（第 ' + attempt + '/' + maxAttempts + ' 次）', { pair: fill.pair, action: target.action, amount, targetPrice: lastMakerQuote.targetPrice, price, bestBid: lastMakerQuote.bestBid, bestAsk: lastMakerQuote.bestAsk, tick: lastMakerQuote.tick, timestamp: attemptPayload.timestamp });
     try {
-      const response = await axios.post(
-        `https://api.bitopro.com/v3/orders/${fill.pair}`,
-        attemptPayload,
-        { headers: signedOrderHeaders(attemptPayload, true), timeout: 15000 }
-      );
+      const response = await axios.post('https://api.bitopro.com/v3/orders/' + fill.pair, attemptPayload, { headers: signedOrderHeaders(attemptPayload, true), timeout: 15000 });
       const result = response.data?.data ?? response.data;
       const orderId = result?.orderId || result?.id || result?.order_id || null;
       addJournal({ ...entry, live: true, result: 'exchange_accepted', orderId, retryCount: attempt - 1, exchangeResponse: result });
-      const successMessage = `交易所已回應反向委託：${fill.pair} ${target.action} ${amount} @ ${target.price}${orderId ? `（訂單 ${orderId}）` : '（未取得訂單 ID，請核對交易所掛單）'}${attempt > 1 ? '（重試成功）' : ''}`;
+      const successMessage = '交易所已回應反向 Maker 委託：' + fill.pair + ' ' + target.action + ' ' + amount + ' @ ' + priceText + (orderId ? '（訂單 ' + orderId + '）' : '（未取得訂單 ID，請核對交易所掛單）') + (attempt > 1 ? '（第 ' + attempt + ' 次重試成功）' : '');
       logOrderConsole('info', successMessage, { orderId, attempt, exchangeResponse: result });
       emit('info', { message: successMessage });
       return;
     } catch (err) {
       lastError = err;
-      logOrderConsole('error', `反向委託建立失敗（第 ${attempt}/2 次）`, { pair: fill.pair, action: target.action, amount, price: target.price, httpStatus: err.response?.status || null, error: apiErrorMessage(err), networkError: !err.response });
-      if (!err.response) break; // 網路逾時／斷線：無法確認交易所是否已收單，不盲目重送
-      if (attempt < 2) {
-        emit('warning', { message: `反向委託第 1 次建立失敗，準備重試：${apiErrorMessage(err)}` });
-        logOrderConsole('warn', '反向委託 0.8 秒後準備重試', { pair: fill.pair, httpStatus: err.response?.status || null });
-        await new Promise(resolve => setTimeout(resolve, 800));
-      }
+      const errorText = apiErrorMessage(err);
+      logOrderConsole('error', '反向 Maker 委託建立失敗（第 ' + attempt + '/' + maxAttempts + ' 次）', { pair: fill.pair, action: target.action, amount, targetPrice: lastMakerQuote.targetPrice, price, httpStatus: err.response?.status || null, error: errorText, networkError: !err.response });
+      if (!err.response) break;
+      const makerRejected = /post.?only|maker|taker|would\s+(?:immediately\s+)?match|cross(?:ed|ing)?\s+(?:the\s+)?book/i.test(errorText) || Number(err.response.status) === 422;
+      if (!makerRejected || attempt >= maxAttempts) break;
+      emit('warning', { message: '反向 Maker 委託遭拒，將重新查詢買賣盤並重算價格（' + attempt + '/' + maxAttempts + '）：' + errorText });
+      await new Promise(resolve => setTimeout(resolve, 250));
     }
   }
-  const message = lastError ? apiErrorMessage(lastError) : '連線中斷或逾時，無法確認交易所是否已接受委託；請先刷新交易所掛單，避免重複下單。';
-  addJournal({ ...entry, live: true, result: 'error', error: message, httpStatus: lastError?.response?.status || null, retryCount: 1 });
-  logOrderConsole('error', '反向委託最終失敗', { pair: fill.pair, action: target.action, amount, price: target.price, httpStatus: lastError?.response?.status || null, error: message });
-  emit('error', { message: `反向委託建立失敗：${message}` });
+  const message = lastError ? (lastError.response ? apiErrorMessage(lastError) : '連線中斷或逾時，無法確認交易所是否已接受委託；請先刷新掛單，避免重複下單。') : '無法取得最新買賣盤，已停止送單。';
+  const failedPrice = lastMakerQuote?.price ?? originalTargetPrice;
+  addJournal({ category: 'counter_order_signal', pair: fill.pair, sourceOrderId: fill.sourceOrderId || fill.orderId || null, sourceOrderKey, sourceAction: fill.action, sourcePrice: Number(fill.price), targetPrice: originalTargetPrice, action: target.action, price: failedPrice, amount, spread: SPREADS[fill.pair], live: LIVE_TRADING, result: 'error', error: message, httpStatus: lastError?.response?.status || null, retryCount: Math.max(0, lastAttempt - 1) });
+  logOrderConsole('error', '反向 Maker 委託最終失敗', { pair: fill.pair, action: target.action, amount, targetPrice: originalTargetPrice, price: failedPrice, httpStatus: lastError?.response?.status || null, error: message });
+  emit('error', { message: '反向 Maker 委託建立失敗：' + message });
 }
 function processHistoryMessage(raw) {
   let msg;
