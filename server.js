@@ -1041,7 +1041,56 @@ function dailySummary() {
   }
   return rows;
 }
-app.get('/api/state', (req, res) => res.json({
+
+app.get('/api/market/:pair', async (req, res) => {
+  const pair = String(req.params.pair || '').toLowerCase();
+  if (!validPair(pair) || !PAIRS.includes(pair)) {
+    return res.status(400).json({ ok: false, error: '此交易對不在目前支援清單中，請先到策略價差設定加入。' });
+  }
+  const allowed = new Set(['1m','5m','15m','30m','1h','4h','1d']);
+  const resolution = allowed.has(String(req.query.resolution || '1d')) ? String(req.query.resolution || '1d') : '1d';
+  const now = Math.floor(Date.now() / 1000);
+  const rangeSeconds = ({'1m': 2*24*3600, '5m': 7*24*3600, '15m': 14*24*3600, '30m': 30*24*3600, '1h': 90*24*3600, '4h': 180*24*3600, '1d': 365*24*3600})[resolution];
+  const requests = await Promise.allSettled([
+    axios.get(`https://api.bitopro.com/v3/tickers/${pair}`, { timeout: 10000 }),
+    axios.get(`https://api.bitopro.com/v3/order-book/${pair}`, { timeout: 10000 }),
+    axios.get(`https://api.bitopro.com/v3/trades/${pair}`, { timeout: 10000 }),
+    axios.get(`https://api.bitopro.com/v3/trading-history/${pair}`, { params: { resolution, from: now-rangeSeconds, to: now }, timeout: 15000 })
+  ]);
+  const body = requests.map(x => x.status === 'fulfilled' ? (x.value.data?.data ?? x.value.data) : null);
+  const tickerRows = Array.isArray(body[0]) ? body[0] : (body[0] ? [body[0]] : []);
+  const rawTicker = tickerRows[0] || {};
+  const ticker = {
+    lastPrice: Number(rawTicker.lastPrice ?? rawTicker.last_price ?? rawTicker.price ?? rawTicker.close ?? rawTicker.last) || null,
+    high: Number(rawTicker.high24hr ?? rawTicker.high_24hr ?? rawTicker.high ?? rawTicker.highPrice) || null,
+    low: Number(rawTicker.low24hr ?? rawTicker.low_24hr ?? rawTicker.low ?? rawTicker.lowPrice) || null,
+    volume: Number(rawTicker.volume24hr ?? rawTicker.volume_24hr ?? rawTicker.volume ?? rawTicker.baseVolume) || null,
+    changeRate: Number(rawTicker.changeRate ?? rawTicker.change_rate ?? rawTicker.change ?? rawTicker.priceChangePercent) || 0
+  };
+  const bookRoot = body[1] || {};
+  const orderBook = {
+    asks: (bookRoot.asks || bookRoot.ask || []).map(x => ({ price: Number(x.price ?? x[0]), amount: Number(x.amount ?? x.volume ?? x.quantity ?? x[1]) })).filter(x => x.price > 0 && x.amount >= 0).sort((a,b)=>a.price-b.price),
+    bids: (bookRoot.bids || bookRoot.bid || []).map(x => ({ price: Number(x.price ?? x[0]), amount: Number(x.amount ?? x.volume ?? x.quantity ?? x[1]) })).filter(x => x.price > 0 && x.amount >= 0).sort((a,b)=>b.price-a.price)
+  };
+  const tradeRoot = body[2];
+  const tradeRows = Array.isArray(tradeRoot) ? tradeRoot : (Array.isArray(tradeRoot?.trades) ? tradeRoot.trades : Array.isArray(tradeRoot?.data) ? tradeRoot.data : []);
+  const trades = tradeRows.slice(0,50).map(x => ({
+    price: Number(x.price ?? x.matchPrice ?? x.match_price),
+    amount: Number(x.amount ?? x.baseAmount ?? x.base_amount ?? x.volume),
+    action: String(x.action ?? x.side ?? '').toUpperCase(),
+    timestamp: Number(x.timestamp ?? x.createdTimestamp ?? x.created_timestamp ?? x.time) || null
+  })).filter(x => x.price > 0 && x.amount >= 0);
+  const candleRoot = body[3];
+  const candleRows = Array.isArray(candleRoot) ? candleRoot : (Array.isArray(candleRoot?.candles) ? candleRoot.candles : Array.isArray(candleRoot?.data) ? candleRoot.data : []);
+  const candles = candleRows.map(x => {
+    const stamp = Number(x.timestamp ?? x.time ?? x.t);
+    const seconds = stamp > 1e12 ? Math.floor(stamp/1000) : stamp;
+    return { time: seconds, open: Number(x.open ?? x.o), high: Number(x.high ?? x.h), low: Number(x.low ?? x.l), close: Number(x.close ?? x.c), volume: Number(x.volume ?? x.v) || 0 };
+  }).filter(x => x.time > 0 && [x.open,x.high,x.low,x.close].every(Number.isFinite)).sort((a,b)=>a.time-b.time);
+  const failures = requests.map((x,i)=>x.status==='rejected'?['ticker','orderBook','trades','candles'][i]+': '+apiErrorMessage(x.reason):null).filter(Boolean);
+  res.json({ ok: true, pair, resolution, ticker, orderBook, trades, candles, warnings: failures });
+});
+\napp.get('/api/state', (req, res) => res.json({
   status, running, liveTrading: LIVE_TRADING, credentialsReady: credentialsReady(),
   balances, assetValuation, events: events.slice(0, 100), daily: dailySummary(),
   journal: journal.slice(0, 200), spreads: SPREADS, bitoTwdPrice, bitoTwdPriceAt
