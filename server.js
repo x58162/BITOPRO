@@ -639,7 +639,7 @@ function roundPriceToPrecision(value, precision, mode) {
   return rounded / factor;
 }
 function formatOrderPrice(value, precision) {
-  return value.toFixed(precision).replace(/\.?0+$/, '');
+  return value.toFixed(precision).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
 }
 async function getMakerSafeCounterPrice(pair, action, originalTargetPrice) {
   const results = await Promise.all([
