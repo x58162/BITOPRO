@@ -348,17 +348,10 @@ async function recordUserTrade(raw, fallbackPair = '', isHistorical = false, fal
   };
   addJournal(entry);
 
-  // 即時成交才觸發反向委託；歷史補登只補紀錄，絕不因回補舊成交而突然送出新訂單。
-  // 使用本次實際成交數量，不使用原始掛單總量，避免部分成交時反向下單過量。
+  // 模式 A：USER_TRADE 只負責記錄每筆實際成交，不在這裡送反向單。
+  // 反向委託統一由訂單歷史事件處理，且必須等原始訂單 status=2 且全部成交，
+  // 避免部分成交時產生多張反向委託，以及 USER_TRADE／歷史事件重複觸發。
   if (!isHistorical) {
-    placeCounterOrder({
-      pair: trade.pair,
-      action: trade.action,
-      price: trade.price,
-      executedAmount: trade.amount,
-      originalAmount: trade.amount
-    }).catch(err => emit('error', { message: `成交已記錄，但觸發反向委託時發生錯誤：${apiErrorMessage(err)}` }));
-    
     // 實際新成交後才更新一次帳戶餘額；歷史回補不觸發，避免連續呼叫 API。
     getAccountBalance().catch(err => emit('error', { message: `成交已記錄，但成交後更新帳戶資產失敗：${apiErrorMessage(err)}` }));
   }
@@ -638,6 +631,8 @@ async function placeCounterOrder(fill) {
   const entry = {
     category: 'counter_order_signal',
     pair: fill.pair,
+    sourceOrderId: fill.sourceOrderId || fill.orderId || null,
+    sourceOrderKey: fill.sourceOrderKey || null,
     sourceAction: fill.action,
     sourcePrice: Number(fill.price),
     action: target.action,
@@ -730,14 +725,26 @@ function processHistoryMessage(raw) {
     if (!Array.isArray(orders)) continue;
     for (const item of orders) {
       if (Number(item.originalAmount) !== Number(item.executedAmount) || Number(item.status) !== 2) continue;
-      const dedupeKey = `${pair}|${item.id || item.orderId || ''}|${item.action}|${item.price}|${item.executedAmount}`;
-      if (seenFills.has(dedupeKey)) continue;
+      const sourceOrderId = String(item.id || item.orderId || item.order_id || '');
+      const dedupeKey = `${pair}|${sourceOrderId}|${item.action}|${item.price}|${item.executedAmount}`;
+      // 同一訂單只允許產生一次反向委託：同時檢查記憶體與已保存的日誌，
+      // 讓程式重啟後再次收到同一筆完成訂單時也不會重複送單。
+      if (seenFills.has(dedupeKey) || journal.some(entry =>
+        entry.category === 'counter_order_signal' && entry.sourceOrderKey === dedupeKey
+      )) continue;
       seenFills.add(dedupeKey);
       if (seenFills.size > 20000) seenFills.clear();
       emit('fill', { message: `完整委託：${pair.toUpperCase()} ${item.action} ${item.executedAmount} @ ${item.price}` });
-      // 維持原本策略訊號行為；最近成交表由實際 match/trade 紀錄提供，避免重複列出整張委託。
-      placeCounterOrder({ pair, price: Number(item.price), action: item.action, originalAmount: item.executedAmount, executedAmount: item.executedAmount })
-        .catch(err => emit('error', { message: err.message }));
+      // 僅在交易所確認原始訂單完整成交後建立一張反向委託。
+      placeCounterOrder({
+        pair,
+        price: Number(item.price),
+        action: String(item.action || '').toUpperCase(),
+        originalAmount: item.executedAmount,
+        executedAmount: item.executedAmount,
+        sourceOrderId,
+        sourceOrderKey: dedupeKey
+      }).catch(err => emit('error', { message: err.message }));
     }
   }
 }
