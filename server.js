@@ -470,7 +470,43 @@ async function backfillTradeHistory() {
     }
     count++;
   }
-  emit('info', { message: `已回補 2026/10/18 起（截至台灣時間 ${todayTaipei}）成交明細：更新／新增 ${count} 筆；10/18 以前不再補查歷史 BITO/TWD 報價。缺少成交時間附近的報價時，手續費台幣成本保留待補，不套用目前價格。` });
+  // Repair existing journal entries whose BITO fee was recorded but whose TWD
+  // conversion is missing. This also repairs old live-stream rows that the REST
+  // backfill matched previously and therefore did not insert again.
+  let repairedFees = 0;
+  const feeRepairRows = journal.filter(e =>
+    e.category === 'filled_trade' &&
+    taipeiDate(e.exchangeTime || e.time) >= '2026-10-18' &&
+    String(e.feeCurrency || '').toUpperCase() === 'BITO' &&
+    Number(e.fee) > 0 &&
+    (e.feeTwdCost == null || !Number.isFinite(Number(e.feeTwdCost)))
+  );
+  for (const entry of feeRepairRows) {
+    // If a valid historical price is already present, calculate the cost without
+    // another network request.
+    const existingPrice = Number(entry.feeBitoTwdPrice);
+    if (existingPrice > 0 && Number.isFinite(existingPrice)) {
+      entry.feeTwdCost = Number(entry.fee) * existingPrice;
+      entry.feePriceStatus = entry.feePriceStatus || 'calculated_from_saved_price';
+      repairedFees++;
+      continue;
+    }
+    const stamp = entry.exchangeTime || entry.time;
+    const minuteKey = Math.floor(Date.parse(toIsoTimestamp(stamp) || '') / 60000);
+    if (Number.isFinite(minuteKey)) historicalBitoMinuteCache.delete(minuteKey);
+    const sample = await fetchHistoricalBitoPriceAt(stamp);
+    if (!sample || !(Number(sample.price) > 0)) continue;
+    entry.feeBitoTwdPrice = Number(sample.price);
+    entry.feePriceTime = sample.time;
+    entry.feeTwdCost = Number(entry.fee) * Number(sample.price);
+    entry.feePriceStatus = sample.source || 'bito_twd_1m_ohlc_close';
+    repairedFees++;
+  }
+  if (repairedFees > 0) {
+    persist();
+    emit('journal', { entries: feeRepairRows.filter(e => e.feeTwdCost != null) });
+  }
+  emit('info', { message: `已回補 2026/10/18 起（截至台灣時間 ${todayTaipei}）成交明細：更新／新增 ${count} 筆；補齊手續費台幣成本 ${repairedFees} 筆；10/18 以前不再補查歷史 BITO/TWD 報價。若歷史報價仍查不到，成本會保留待補，不套用目前價格。` });
 }
 
 async function updateAssetValuation() {
