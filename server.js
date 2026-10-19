@@ -736,7 +736,7 @@ async function placeCounterOrder(fill) {
     if (!credentialsReady()) {
       addJournal({ ...entry, live: false, result: 'error', error: '缺少 BitoPro API 憑證' });
       logOrderConsole('error', '反向委託失敗：缺少 BitoPro API 憑證', { pair: fill.pair, action: target.action, amount, status: 'FAILED' });
-      emit('error', { message: '自動反向委託未送出：請設定 BITOPRO_API_KEY、BITOPRO_API_SECRET、BITOPRO_API_EMAIL。' });
+      emit('error', { message: '自動反向委託未送出：請設定 BITOPRO_API_KEY、BITOPRO_API_SECRET、BITOPRO_EMAIL。' });
       return;
     }
     const attemptPayload = { ...payload, timestamp: apiTimestamp() };
