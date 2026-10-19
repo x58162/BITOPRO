@@ -750,7 +750,7 @@ function dailySummary() {
     if (!map[day]) map[day] = {
       date: day, fills: 0, signals: 0, submitted: 0, failed: 0,
       estimatedGross: 0, estimatedFees: 0, estimatedNet: 0,
-      matchedAmount: 0, unmatchedBuyAmount: 0
+      feePending: 0, matchedAmount: 0, unmatchedBuyAmount: 0
     };
     return map[day];
   };
@@ -827,7 +827,12 @@ function dailySummary() {
     if (!d) continue;
     d.fills++;
     const feeTwd = Number(e.feeTwdCost);
-    if (Number.isFinite(feeTwd) && feeTwd >= 0) d.estimatedFees += feeTwd;
+    if (Number.isFinite(feeTwd) && feeTwd >= 0) {
+      d.estimatedFees += feeTwd;
+    } else if (Number(e.fee) > 0 && String(e.feeCurrency || '').toUpperCase() === 'BITO') {
+      // Expose missing conversions instead of presenting a deceptively low fee total.
+      d.feePending++;
+    }
   }
 
   // FIFO inventory matching across dates. Profit is realized on the sell date.
