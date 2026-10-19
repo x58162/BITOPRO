@@ -212,7 +212,7 @@ function paintPairMarketStats(el,t){
  const last=Number(t.lastPrice),low=Number(t.low),high=Number(t.high);
  const validLow=Number.isFinite(low)&&low>0,validHigh=Number.isFinite(high)&&high>0;
  const diff=validLow&&validHigh?high-low:NaN;
- el.innerHTML='<span>最新：<strong>'+marketFormat(last,8)+'</strong></span><span>24h 低／高：'+marketFormat(low,8)+' ／ '+marketFormat(high,8)+'</span><span class="range-diff">高低差：'+marketFormat(diff,8)+'</span>';
+ el.innerHTML='<span>最新價格：<strong>'+marketFormat(last,8)+'</strong></span><span>最近 15 分鐘最低／最高：'+marketFormat(low,8)+' ／ '+marketFormat(high,8)+'</span><span class="range-diff">最近 15 分鐘高低差：'+marketFormat(diff,8)+'</span>';
 }
 function resetSpreadInputs(){render();$('spreadStatus').textContent='已重新載入伺服器目前設定。'}
 let initialBalanceReadStarted = false;
