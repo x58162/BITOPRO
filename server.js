@@ -817,39 +817,97 @@ function processHistoryMessage(raw) {
         }
         continue;
       }
-      const sourceOrderId = String(item.id || item.orderId || item.order_id || '');
-      const dedupeKey = `${pair}|${sourceOrderId}|${item.action}|${item.price}|${item.executedAmount}`;
-      // 同一訂單只允許產生一次反向委託：同時檢查記憶體與已保存的日誌，
-      // 讓程式重啟後再次收到同一筆完成訂單時也不會重複送單。
-      if (seenFills.has(dedupeKey) || journal.some(entry =>
-        entry.category === 'counter_order_signal' && entry.sourceOrderKey === dedupeKey
-      )) {
-        logOrderConsole('warn', '完整成交已偵測但略過反向委託：防重複', { pair, sourceOrderId, action: item.action, status: 'SKIPPED_DUPLICATE' });
-        continue;
-      }
-      logOrderConsole('info', '偵測到完整成交，準備建立反向委託', {
-        pair, sourceOrderId, sourceAction: String(item.action || '').toUpperCase(),
-        counterAction: String(item.action || '').toUpperCase() === 'SELL' ? 'BUY' : 'SELL',
-        price: Number(item.price), amount: executedAmount, liveTrading: LIVE_TRADING
-      });
-      seenFills.add(dedupeKey);
-      if (seenFills.size > 20000) seenFills.clear();
-      emit('fill', { message: `完整委託：${pair.toUpperCase()} ${item.action} ${item.executedAmount} @ ${item.price}` });
-      // 僅在交易所確認原始訂單完整成交後建立一張反向委託。
-      placeCounterOrder({
-        pair,
-        price: Number(item.price),
-        action: String(item.action || '').toUpperCase(),
-        originalAmount: item.executedAmount,
-        executedAmount: item.executedAmount,
-        sourceOrderId,
-        sourceOrderKey: dedupeKey
-      }).catch(err => emit('error', { message: err.message }));
+      handleCompletedOrder(pair, item, 'order_history').catch(err =>
+        logOrderConsole('error', '處理已完成訂單失敗', { pair, orderId: item.id || item.orderId || null, error: err.message })
+      );
     }
   }
 }
 
 const seenFills = new Set();
+const pendingOrderChecks = new Set();
+
+async function handleCompletedOrder(pair, item, source = 'unknown') {
+  const originalAmount = Number(item.originalAmount);
+  const executedAmount = Number(item.executedAmount);
+  const orderStatus = Number(item.status);
+  const action = String(item.action || '').toUpperCase();
+  const sourceOrderId = String(item.id || item.orderID || item.orderId || item.order_id || '');
+  const price = Number(item.price);
+  if (!PAIRS.includes(pair) || !sourceOrderId || !['BUY', 'SELL'].includes(action) ||
+      !(price > 0) || !(originalAmount > 0) || originalAmount !== executedAmount || orderStatus !== 2) {
+    logOrderConsole('info', '訂單尚未符合反向委託條件', {
+      source, pair, sourceOrderId: sourceOrderId || null, action,
+      originalAmount, executedAmount, exchangeStatus: item.status,
+      reason: originalAmount !== executedAmount ? '尚未完整成交' : (orderStatus !== 2 ? '訂單狀態不是 2' : '訂單欄位不完整')
+    });
+    return;
+  }
+  const dedupeKey = `${pair}|${sourceOrderId}|${action}|${item.price}|${item.executedAmount}`;
+  if (seenFills.has(dedupeKey) || journal.some(entry =>
+    entry.category === 'counter_order_signal' && entry.sourceOrderKey === dedupeKey
+  )) {
+    logOrderConsole('warn', '完整成交已偵測但略過反向委託：防重複', { pair, sourceOrderId, action, source, status: 'SKIPPED_DUPLICATE' });
+    return;
+  }
+  seenFills.add(dedupeKey);
+  if (seenFills.size > 20000) seenFills.clear();
+  logOrderConsole('info', '偵測到完整成交，準備建立反向委託', {
+    source, pair, sourceOrderId, sourceAction: action,
+    counterAction: action === 'SELL' ? 'BUY' : 'SELL',
+    price, amount: executedAmount, liveTrading: LIVE_TRADING
+  });
+  emit('fill', { message: '完整委託：' + pair.toUpperCase() + ' ' + action + ' ' + executedAmount + ' @ ' + item.price });
+  try {
+    await placeCounterOrder({
+      pair, price, action, originalAmount: executedAmount, executedAmount,
+      sourceOrderId, sourceOrderKey: dedupeKey
+    });
+  } catch (err) {
+    if (!journal.some(entry => entry.category === 'counter_order_signal' && entry.sourceOrderKey === dedupeKey)) {
+      seenFills.delete(dedupeKey);
+    }
+    throw err;
+  }
+}
+
+async function checkUserTradeOrder(pair, tradeData) {
+  const orderId = String(tradeData.orderID || tradeData.orderId || tradeData.order_id || '');
+  if (!PAIRS.includes(pair) || !orderId) {
+    logOrderConsole('warn', '即時成交缺少有效交易對或訂單編號，無法核對完整成交', {
+      pair, orderId: orderId || null, tradeDataKeys: Object.keys(tradeData || {})
+    });
+    return;
+  }
+  const pendingKey = pair + '|' + orderId;
+  if (pendingOrderChecks.has(pendingKey)) return;
+  pendingOrderChecks.add(pendingKey);
+  try {
+    let order = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const response = await axios.get(
+          'https://api.bitopro.com/v3/orders/' + pair + '/' + encodeURIComponent(orderId),
+          { headers: authHeaders(), timeout: 10000 }
+        );
+        order = response.data?.data ?? response.data;
+      } catch (err) {
+        logOrderConsole('warn', '即時成交後查詢原始訂單失敗', {
+          pair, orderId, attempt, error: apiErrorMessage(err)
+        });
+      }
+      if (order && Number(order.originalAmount) === Number(order.executedAmount) && Number(order.status) === 2) break;
+      if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 300 * attempt));
+    }
+    if (!order) {
+      logOrderConsole('error', '即時成交後仍無法取得原始訂單資料，未送出反向委託', { pair, orderId });
+      return;
+    }
+    await handleCompletedOrder(pair, order, 'user_trade_order_lookup');
+  } finally {
+    pendingOrderChecks.delete(pendingKey);
+  }
+}
 
 let tradeWs = null;
 let tradeReconnectTimer = null;
@@ -875,15 +933,21 @@ function connectUserTradeSocket() {
         rawPreview: rawText.slice(0, 800)
       });
       if (msg?.event !== 'USER_TRADE' || !msg.data) return;
-      logOrderConsole('info', '偵測到即時成交事件（目前僅記錄，尚未觸發反向委託）', {
-        pair: `${msg.data.base || ''}_${msg.data.quote || ''}`.toLowerCase(),
-        action: msg.data.action || msg.data.side || null,
+      const tradePair = (String(msg.data.base || '') + '_' + String(msg.data.quote || '')).toLowerCase();
+      logOrderConsole('info', '偵測到即時成交事件，開始核對原始訂單是否完整成交', {
+        pair: tradePair,
+        action: msg.data.side || msg.data.action || null,
         price: msg.data.price || null,
-        amount: msg.data.amount || msg.data.baseAmount || null,
-        orderId: msg.data.orderId || msg.data.order_id || null
+        amount: msg.data.volume || msg.data.baseAmount || msg.data.amount || null,
+        orderId: msg.data.orderID || msg.data.orderId || msg.data.order_id || null
       });
-      recordUserTrade({ ...msg.data, timestamp: msg.data.transactionTimestamp || msg.timestamp }, `${msg.data.base || ''}_${msg.data.quote || ''}`, false)
-        .catch(err => emit('error', { message: `記錄即時成交失敗：${err.message}` }));
+      recordUserTrade({ ...msg.data, timestamp: msg.data.transactionTimestamp || msg.timestamp }, tradePair, false)
+        .catch(err => emit('error', { message: '記錄即時成交失敗：' + err.message }));
+      checkUserTradeOrder(tradePair, msg.data).catch(err =>
+        logOrderConsole('error', '即時成交核對原始訂單時發生錯誤', {
+          pair: tradePair, orderId: msg.data.orderID || msg.data.orderId || null, error: err.message
+        })
+      );
     });
     tradeWs.on('error', err => emit('warning', { message: `User Trade Stream 錯誤：${err.message}` }));
     tradeWs.on('close', () => {
