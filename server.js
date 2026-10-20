@@ -768,10 +768,34 @@ async function placeCounterOrder(fill) {
   emit('error', { message: '反向 Maker 委託建立失敗：' + message });
 }
 function processHistoryMessage(raw) {
+  const rawText = raw.toString();
   let msg;
-  try { msg = JSON.parse(raw.toString()); } catch { return; }
-  if (firstLoad) { firstLoad = false; emit('info', { message: '已收到首次訂單歷史快照；為避免重啟後重複下單，本次快照不會觸發反向委託。' }); return; }
+  try {
+    msg = JSON.parse(rawText);
+  } catch (err) {
+    logOrderConsole('error', '訂單歷史 WebSocket 收到非 JSON 訊息', { error: err.message, rawPreview: rawText.slice(0, 500) });
+    return;
+  }
   const data = msg && msg.data;
+  const dataKeys = data && typeof data === 'object' ? Object.keys(data) : [];
+  const pairSummary = {};
+  if (data && typeof data === 'object') {
+    for (const key of dataKeys) {
+      if (Array.isArray(data[key])) pairSummary[key] = data[key].length;
+    }
+  }
+  logOrderConsole('info', '收到訂單歷史 WebSocket 訊息', {
+    firstLoad, event: msg.event || null, messageKeys: Object.keys(msg),
+    dataType: Array.isArray(data) ? 'array' : typeof data,
+    dataKeys: dataKeys.slice(0, 30), pairArrayCounts: pairSummary,
+    rawPreview: rawText.slice(0, 800)
+  });
+  if (firstLoad) {
+    firstLoad = false;
+    emit('info', { message: '已收到首次訂單歷史快照；為避免重啟後重複下單，本次快照不會觸發反向委託。' });
+    logOrderConsole('warn', '首次訂單歷史快照目前只記錄、不觸發反向委託', { dataKeys: dataKeys.slice(0, 30), pairArrayCounts: pairSummary });
+    return;
+  }
   if (!data || typeof data !== 'object') {
     logOrderConsole('warn', '訂單歷史訊息格式異常：缺少 data', { receivedType: typeof data });
     return;
@@ -833,10 +857,31 @@ function connectUserTradeSocket() {
   if (!running || !credentialsReady()) return;
   try {
     tradeWs = new WebSocket('wss://stream.bitopro.com:443/ws/v1/pub/auth/user-trades', { headers: authHeaders() });
-    tradeWs.on('open', () => emit('info', { message: 'User Trade Stream 已連線；BITO/TWD 只會在新成交時抓取。' }));
+    tradeWs.on('open', () => {
+      logOrderConsole('info', 'User Trade Stream 已建立連線', { url: 'wss://stream.bitopro.com:443/ws/v1/pub/auth/user-trades' });
+      emit('info', { message: 'User Trade Stream 已連線；BITO/TWD 只會在新成交時抓取。' });
+    });
     tradeWs.on('message', raw => {
-      let msg; try { msg = JSON.parse(raw.toString()); } catch { return; }
+      const rawText = raw.toString();
+      let msg;
+      try { msg = JSON.parse(rawText); }
+      catch (err) {
+        logOrderConsole('error', 'User Trade Stream 收到非 JSON 訊息', { error: err.message, rawPreview: rawText.slice(0, 500) });
+        return;
+      }
+      logOrderConsole('info', '收到 User Trade Stream 訊息', {
+        event: msg?.event || null, messageKeys: Object.keys(msg || {}),
+        dataKeys: msg?.data && typeof msg.data === 'object' ? Object.keys(msg.data) : [],
+        rawPreview: rawText.slice(0, 800)
+      });
       if (msg?.event !== 'USER_TRADE' || !msg.data) return;
+      logOrderConsole('info', '偵測到即時成交事件（目前僅記錄，尚未觸發反向委託）', {
+        pair: `${msg.data.base || ''}_${msg.data.quote || ''}`.toLowerCase(),
+        action: msg.data.action || msg.data.side || null,
+        price: msg.data.price || null,
+        amount: msg.data.amount || msg.data.baseAmount || null,
+        orderId: msg.data.orderId || msg.data.order_id || null
+      });
       recordUserTrade({ ...msg.data, timestamp: msg.data.transactionTimestamp || msg.timestamp }, `${msg.data.base || ''}_${msg.data.quote || ''}`, false)
         .catch(err => emit('error', { message: `記錄即時成交失敗：${err.message}` }));
     });
@@ -861,6 +906,7 @@ function connectHistorySocket() {
   try {
     ws = new WebSocket('wss://stream.bitopro.com:443/ws/v1/pub/auth/orders/histories', { headers: authHeaders() });
     ws.on('open', () => {
+      logOrderConsole('info', '訂單歷史 WebSocket 已建立連線', { url: 'wss://stream.bitopro.com:443/ws/v1/pub/auth/orders/histories', liveTrading: LIVE_TRADING, pairs: PAIRS });
       setStatus('connected', 'Histories WebSocket 已連線');
       getAccountBalance().catch(err => {
         setStatus('error', '取得餘額失敗', err.response?.data || err.message);
