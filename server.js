@@ -770,21 +770,44 @@ async function placeCounterOrder(fill) {
 function processHistoryMessage(raw) {
   let msg;
   try { msg = JSON.parse(raw.toString()); } catch { return; }
-  if (firstLoad) { firstLoad = false; emit('info', { message: '已收到首次訂單歷史快照；成交紀錄由 User Trade Stream／歷史成交 API 寫入。' }); return; }
+  if (firstLoad) { firstLoad = false; emit('info', { message: '已收到首次訂單歷史快照；為避免重啟後重複下單，本次快照不會觸發反向委託。' }); return; }
   const data = msg && msg.data;
-  if (!data || typeof data !== 'object') return;
+  if (!data || typeof data !== 'object') {
+    logOrderConsole('warn', '訂單歷史訊息格式異常：缺少 data', { receivedType: typeof data });
+    return;
+  }
   for (const pair of PAIRS) {
     const orders = data[pair];
     if (!Array.isArray(orders)) continue;
     for (const item of orders) {
-      if (Number(item.originalAmount) !== Number(item.executedAmount) || Number(item.status) !== 2) continue;
+      const originalAmount = Number(item.originalAmount);
+      const executedAmount = Number(item.executedAmount);
+      const orderStatus = Number(item.status);
+      if (originalAmount !== executedAmount || orderStatus !== 2) {
+        if (String(item.action || '').toUpperCase() === 'SELL' && executedAmount > 0) {
+          logOrderConsole('info', '賣單尚未符合反向買單觸發條件', {
+            pair, orderId: item.id || item.orderId || item.order_id || null,
+            originalAmount, executedAmount, exchangeStatus: item.status,
+            reason: originalAmount !== executedAmount ? '尚未完整成交' : '訂單狀態不是 2'
+          });
+        }
+        continue;
+      }
       const sourceOrderId = String(item.id || item.orderId || item.order_id || '');
       const dedupeKey = `${pair}|${sourceOrderId}|${item.action}|${item.price}|${item.executedAmount}`;
       // 同一訂單只允許產生一次反向委託：同時檢查記憶體與已保存的日誌，
       // 讓程式重啟後再次收到同一筆完成訂單時也不會重複送單。
       if (seenFills.has(dedupeKey) || journal.some(entry =>
         entry.category === 'counter_order_signal' && entry.sourceOrderKey === dedupeKey
-      )) continue;
+      )) {
+        logOrderConsole('warn', '完整成交已偵測但略過反向委託：防重複', { pair, sourceOrderId, action: item.action, status: 'SKIPPED_DUPLICATE' });
+        continue;
+      }
+      logOrderConsole('info', '偵測到完整成交，準備建立反向委託', {
+        pair, sourceOrderId, sourceAction: String(item.action || '').toUpperCase(),
+        counterAction: String(item.action || '').toUpperCase() === 'SELL' ? 'BUY' : 'SELL',
+        price: Number(item.price), amount: executedAmount, liveTrading: LIVE_TRADING
+      });
       seenFills.add(dedupeKey);
       if (seenFills.size > 20000) seenFills.clear();
       emit('fill', { message: `完整委託：${pair.toUpperCase()} ${item.action} ${item.executedAmount} @ ${item.price}` });
