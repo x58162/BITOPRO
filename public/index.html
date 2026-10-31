@@ -127,7 +127,7 @@ function renderMarketDepth(rows,target,side){
 async function loadMarket(manual=false){
   if(marketLoadBusy)return;
   marketLoadBusy=true;
-  const pair=$('marketPair')?.value||Object.keys(state.spreads||{})[0]||'bnb_twd';
+  const pair=$('marketPair')?.value||'usdt_twd';
   const resolution=$('marketResolution')?.value||'1d';
   $('marketChartStatus').textContent='正在更新 '+pair.toUpperCase()+'…';
   try{
@@ -166,10 +166,13 @@ async function loadMarket(manual=false){
 }
 function initMarketPairs(){
   const sel=$('marketPair');if(!sel)return;
-  const pairs=Object.keys(state.spreads||{});const previous=sel.value;
+  const configuredPairs=Object.keys(state.spreads||{});
+  // 行情首頁固定優先 USDT/TWD；即使策略價差尚未設定，也允許單獨查看公開行情。
+  const pairs=[...new Set(['usdt_twd',...configuredPairs])];
+  const previous=sel.value;
   sel.innerHTML=pairs.map(p=>'<option value="'+esc(p)+'">'+esc(p.toUpperCase().replace('_',' / '))+'</option>').join('');
   if(pairs.includes(previous))sel.value=previous;
-  else if(pairs.includes('bnb_twd'))sel.value='bnb_twd';
+  else sel.value='usdt_twd';
 }
 $('marketPair')?.addEventListener('change',()=>loadMarket(true));
 $('marketResolution')?.addEventListener('change',()=>loadMarket(true));
