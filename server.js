@@ -691,11 +691,12 @@ async function placeCounterOrder(fill) {
   const gridId = fill.gridId || ('GRID-' + crypto.randomUUID());
   const originalBuyPrice = Number(fill.originalBuyPrice || (fill.action === 'BUY' ? fill.price : 0));
   const originalSpread = Number(fill.originalSpread ?? SPREADS[fill.pair]);
+  const originalSellPrice = Number(fill.originalSellPrice || (originalBuyPrice > 0 ? originalBuyPrice + originalSpread : 0));
   const restoringOriginalBuy = fill.action === 'SELL' && originalBuyPrice > 0;
   const target = restoringOriginalBuy
     ? { action: 'BUY', price: String(originalBuyPrice) }
     : (fill.action === 'BUY' && fill.gridId && originalBuyPrice > 0
-      ? { action: 'SELL', price: String(originalBuyPrice + originalSpread) }
+      ? { action: 'SELL', price: String(originalSellPrice) }
       : calculateTarget(fill.pair, fill.price, fill.action));
   if (!target) {
     logOrderConsole('error', '反向委託失敗：無法計算目標價格', { pair: fill.pair, sourceAction: fill.action, sourcePrice: fill.price, spread: SPREADS[fill.pair], status: 'FAILED' });
@@ -743,7 +744,7 @@ async function placeCounterOrder(fill) {
     const estimatedFee = (Math.abs(Number(fill.price) * amount) + Math.abs(price * amount)) * FEE_RATE;
     const entry = {
       category: 'counter_order_signal', pair: fill.pair,
-      gridId, originalBuyPrice: originalBuyPrice || null, originalSpread,
+      gridId, originalBuyPrice: originalBuyPrice || null, originalSellPrice: originalSellPrice || null, originalSpread,
       restoresOriginalBuyPrice: strictOriginalBuyPrice,
       sourceOrderId: fill.sourceOrderId || fill.orderId || null, sourceOrderKey,
       sourceAction: fill.action, sourcePrice: Number(fill.price), targetPrice: lastMakerQuote.targetPrice,
@@ -789,7 +790,7 @@ async function placeCounterOrder(fill) {
   }
   const message = lastError ? (lastError.response ? apiErrorMessage(lastError) : '連線中斷或逾時，無法確認交易所是否已接受委託；請先刷新掛單，避免重複下單。') : '無法取得最新買賣盤，已停止送單。';
   const failedPrice = lastMakerQuote?.price ?? originalTargetPrice;
-  addJournal({ category: 'counter_order_signal', pair: fill.pair, gridId, originalBuyPrice: originalBuyPrice || null, originalSpread, restoresOriginalBuyPrice: strictOriginalBuyPrice, sourceOrderId: fill.sourceOrderId || fill.orderId || null, sourceOrderKey, sourceAction: fill.action, sourcePrice: Number(fill.price), targetPrice: originalTargetPrice, action: target.action, price: failedPrice, amount, spread: originalSpread, live: LIVE_TRADING, result: 'error', error: message, httpStatus: lastError?.response?.status || null, retryCount: Math.max(0, lastAttempt - 1) });
+  addJournal({ category: 'counter_order_signal', pair: fill.pair, gridId, originalBuyPrice: originalBuyPrice || null, originalSellPrice: originalSellPrice || null, originalSpread, restoresOriginalBuyPrice: strictOriginalBuyPrice, sourceOrderId: fill.sourceOrderId || fill.orderId || null, sourceOrderKey, sourceAction: fill.action, sourcePrice: Number(fill.price), targetPrice: originalTargetPrice, action: target.action, price: failedPrice, amount, spread: originalSpread, live: LIVE_TRADING, result: 'error', error: message, httpStatus: lastError?.response?.status || null, retryCount: Math.max(0, lastAttempt - 1) });
   logOrderConsole('error', '建立訂單最終狀態：失敗', { pair: fill.pair, action: target.action, amount, targetPrice: originalTargetPrice, price: failedPrice, httpStatus: lastError?.response?.status || null, error: message, status: 'FAILED' });
   emit('error', { message: '反向 Maker 委託建立失敗：' + message });
 }
@@ -904,10 +905,12 @@ async function handleCompletedOrder(pair, item, source = 'unknown') {
   const gridContext = parentSignal?.gridId ? {
     gridId: parentSignal.gridId,
     originalBuyPrice: Number(parentSignal.originalBuyPrice),
+    originalSellPrice: Number(parentSignal.originalSellPrice || (Number(parentSignal.originalBuyPrice) + Number(parentSignal.originalSpread ?? parentSignal.spread))),
     originalSpread: Number(parentSignal.originalSpread ?? parentSignal.spread)
   } : (action === 'BUY' ? {
     gridId: 'GRID-' + crypto.randomUUID(),
     originalBuyPrice: price,
+    originalSellPrice: price + Number(SPREADS[pair]),
     originalSpread: Number(SPREADS[pair])
   } : null);
   if (seenFills.has(dedupeKey) || journal.some(entry =>
