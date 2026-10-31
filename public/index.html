@@ -102,7 +102,7 @@ function getBalanceBaselines(rows) {
 }
 
 
-let marketChart=null, marketCandleSeries=null, marketVolumeChart=null, marketVolumeSeries=null, marketLoadBusy=false, marketLastLoadedAt=0;
+let marketChart=null, marketCandleSeries=null, marketVolumeChart=null, marketVolumeSeries=null, marketLoadBusy=false, marketLastLoadedAt=0, marketViewKey='', marketHasInitialView=false;
 const marketFormat=(value,digits=8)=>Number.isFinite(Number(value))?Number(value).toLocaleString('zh-TW',{maximumFractionDigits:digits}):'—';
 function initMarketChart(){
   if(!window.LightweightCharts||!$('marketChart')||!$('marketVolumeChart'))return;
@@ -135,7 +135,18 @@ async function loadMarket(manual=false){
     initMarketChart();
     const candles=(d.candles||[]).map(x=>({time:Number(x.time),open:Number(x.open),high:Number(x.high),low:Number(x.low),close:Number(x.close)})).filter(x=>x.time>0&&[x.open,x.high,x.low,x.close].every(Number.isFinite)).sort((a,b)=>a.time-b.time);
     const unique=[];for(const c of candles){if(unique.length&&unique[unique.length-1].time===c.time)unique[unique.length-1]=c;else unique.push(c);}
-    if(marketCandleSeries&&unique.length){marketCandleSeries.setData(unique);marketChart.timeScale().fitContent();marketVolumeSeries.setData((d.candles||[]).map(x=>({time:Number(x.time),value:Number(x.volume)||0,color:Number(x.close)>=Number(x.open)?'rgba(14,203,129,.7)':'rgba(246,70,93,.7)'})).filter(x=>x.time>0).sort((a,b)=>a.time-b.time));marketVolumeChart.timeScale().fitContent();}
+    if(marketCandleSeries&&unique.length){
+      const nextViewKey=pair+'|'+resolution;
+      const sameView=marketViewKey===nextViewKey&&marketHasInitialView;
+      const priceRange=sameView?marketChart.timeScale().getVisibleLogicalRange():null;
+      const volumeRange=sameView?marketVolumeChart.timeScale().getVisibleLogicalRange():null;
+      marketCandleSeries.setData(unique);
+      marketVolumeSeries.setData((d.candles||[]).map(x=>({time:Number(x.time),value:Number(x.volume)||0,color:Number(x.close)>=Number(x.open)?'rgba(14,203,129,.7)':'rgba(246,70,93,.7)'})).filter(x=>x.time>0).sort((a,b)=>a.time-b.time));
+      if(priceRange)marketChart.timeScale().setVisibleLogicalRange(priceRange);else marketChart.timeScale().fitContent();
+      if(volumeRange)marketVolumeChart.timeScale().setVisibleLogicalRange(volumeRange);else marketVolumeChart.timeScale().fitContent();
+      marketViewKey=nextViewKey;
+      marketHasInitialView=true;
+    }
     const t=d.ticker||{};
     $('marketLastPrice').textContent=marketFormat(t.lastPrice,8);
     const change=Number(t.changeRate??t.change??NaN);
