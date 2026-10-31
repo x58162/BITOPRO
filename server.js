@@ -709,7 +709,9 @@ async function placeCounterOrder(fill) {
     return;
   }
   const originalTargetPrice = Number(target.price);
-  const strictOriginalBuyPrice = restoringOriginalBuy;
+  // 反向買單允許在市場跌破原目標時向下調整；反向賣單允許在市場突破原目標時向上調整。
+  // 兩者都由 getMakerSafeCounterPrice 依最新 order book 計算 Maker 價格。
+  const strictOriginalBuyPrice = false;
   const sourceOrderKey = fill.sourceOrderKey || null;
   let lastError = null;
   let lastMakerQuote = null;
@@ -727,10 +729,10 @@ async function placeCounterOrder(fill) {
     catch (err) {
       lastError = err;
       logOrderConsole('warn', '反向委託暫時無法取得 Maker 安全價格', { pair: fill.pair, action: target.action, attempt, error: err.message, status: 'WAITING_MAKER_PRICE' });
-      // 原始買價不可移動；短暫等待後重新讀取 order book，仍不安全就停止，不改價追單。
-      if (strictOriginalBuyPrice && attempt < maxAttempts) {
-        emit('warning', { message: '原始買價暫時不符合 POST_ONLY，將保留原價並重新檢查（' + attempt + '/' + maxAttempts + '）' });
-        await new Promise(resolve => setTimeout(resolve, 1000));
+      // 讀取報價或計算 Maker 價格暫時失敗時，最多重新讀取三次。
+      if (attempt < maxAttempts) {
+        emit('warning', { message: '反向委託暫時無法取得有效 Maker 價格，將重新讀取買賣盤（' + attempt + '/' + maxAttempts + '）：' + err.message });
+        await new Promise(resolve => setTimeout(resolve, 500 * attempt));
         continue;
       }
       break;
@@ -778,10 +780,11 @@ async function placeCounterOrder(fill) {
       const errorText = apiErrorMessage(err);
       logOrderConsole('error', '建立訂單狀態：失敗（第 ' + attempt + '/' + maxAttempts + ' 次）', { pair: fill.pair, action: target.action, amount, targetPrice: lastMakerQuote.targetPrice, price, httpStatus: err.response?.status || null, error: errorText, networkError: !err.response, status: 'FAILED' });
       if (!err.response) break;
-      const makerRejected = /post.?only|maker|taker|would\s+(?:immediately\s+)?match|cross(?:ed|ing)?\s+(?:the\s+)?book/i.test(errorText) || Number(err.response.status) === 422;
-      if (!makerRejected || attempt >= maxAttempts) break;
-      emit('warning', { message: '反向 Maker 委託遭拒，將重新查詢買賣盤並重算價格（' + attempt + '/' + maxAttempts + '）：' + errorText });
-      await new Promise(resolve => setTimeout(resolve, 250));
+      // 有明確 HTTP 回應代表交易所拒絕本次建立請求；重新讀取 order book 後最多再試。
+      // 沒有 HTTP 回應的逾時屬於結果不明，不能盲目重送，以免交易所已收單卻重複建立。
+      if (attempt >= maxAttempts) break;
+      emit('warning', { message: '反向委託建立遭交易所拒絕，將重新查詢買賣盤並重試（' + attempt + '/' + maxAttempts + '）：' + errorText });
+      await new Promise(resolve => setTimeout(resolve, 300 * attempt));
     }
   }
   const message = lastError ? (lastError.response ? apiErrorMessage(lastError) : '連線中斷或逾時，無法確認交易所是否已接受委託；請先刷新掛單，避免重複下單。') : '無法取得最新買賣盤，已停止送單。';
