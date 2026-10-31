@@ -815,8 +815,33 @@ function processHistoryMessage(raw) {
   });
   if (firstLoad) {
     firstLoad = false;
-    emit('info', { message: '已收到首次訂單歷史快照；為避免重啟後重複下單，本次快照不會觸發反向委託。' });
-    logOrderConsole('warn', '首次訂單歷史快照目前只記錄、不觸發反向委託', { dataKeys: dataKeys.slice(0, 30), pairArrayCounts: pairSummary });
+    const completedOrders = [];
+    for (const pair of PAIRS) {
+      const orders = data && typeof data === 'object' ? data[pair] : null;
+      if (!Array.isArray(orders)) continue;
+      for (const item of orders) {
+        const originalAmount = Number(item.originalAmount);
+        const executedAmount = Number(item.executedAmount);
+        const orderStatus = Number(item.status);
+        if (originalAmount > 0 && originalAmount === executedAmount && orderStatus === 2) {
+          completedOrders.push({
+            pair,
+            orderId: item.id || item.orderID || item.orderId || item.order_id || null,
+            action: String(item.action || '').toUpperCase(),
+            price: Number(item.price),
+            amount: executedAmount,
+            status: orderStatus
+          });
+        }
+      }
+    }
+    emit('info', { message: '已收到首次訂單歷史快照；本次僅盤點、不觸發反向委託。完整成交 ' + completedOrders.length + ' 筆。' });
+    logOrderConsole('warn', '首次訂單歷史快照僅盤點、不觸發反向委託', {
+      dataKeys: dataKeys.slice(0, 30),
+      pairArrayCounts: pairSummary,
+      completedOrderCount: completedOrders.length,
+      completedOrders: completedOrders.slice(0, 100)
+    });
     return;
   }
   if (!data || typeof data !== 'object') {
