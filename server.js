@@ -726,7 +726,13 @@ async function placeCounterOrder(fill) {
     try { lastMakerQuote = await getMakerSafeCounterPrice(fill.pair, target.action, originalTargetPrice, { strictPrice: strictOriginalBuyPrice }); }
     catch (err) {
       lastError = err;
-      logOrderConsole('error', '反向委託失敗：取得 Maker 安全價格失敗', { pair: fill.pair, action: target.action, attempt, error: err.message, status: 'FAILED' });
+      logOrderConsole('warn', '反向委託暫時無法取得 Maker 安全價格', { pair: fill.pair, action: target.action, attempt, error: err.message, status: 'WAITING_MAKER_PRICE' });
+      // 原始買價不可移動；短暫等待後重新讀取 order book，仍不安全就停止，不改價追單。
+      if (strictOriginalBuyPrice && attempt < maxAttempts) {
+        emit('warning', { message: '原始買價暫時不符合 POST_ONLY，將保留原價並重新檢查（' + attempt + '/' + maxAttempts + '）' });
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        continue;
+      }
       break;
     }
     const price = lastMakerQuote.price;
