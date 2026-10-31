@@ -649,7 +649,7 @@ function roundPriceToPrecision(value, precision, mode) {
 function formatOrderPrice(value, precision) {
   return value.toFixed(precision).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
 }
-async function getMakerSafeCounterPrice(pair, action, originalTargetPrice) {
+async function getMakerSafeCounterPrice(pair, action, originalTargetPrice, options = {}) {
   const results = await Promise.all([
     getPairPricePrecision(pair),
     axios.get('https://api.bitopro.com/v3/order-book/' + pair, { params: { limit: 5 }, timeout: 8000 })
@@ -668,9 +668,15 @@ async function getMakerSafeCounterPrice(pair, action, originalTargetPrice) {
     : roundPriceToPrecision(originalTargetPrice, precision, 'floor');
   // SELL 必須高於買一；BUY 必須低於賣一。調整價格只能朝策略有利方向。
   const makerBoundary = action === 'SELL' ? bestBid + tick : bestAsk - tick;
-  const finalPrice = action === 'SELL'
-    ? Math.max(baseTarget, roundPriceToPrecision(makerBoundary, precision, 'ceil'))
-    : Math.min(baseTarget, roundPriceToPrecision(makerBoundary, precision, 'floor'));
+  // 固定格子回補買單必須守住原始買價；若該價格會立即成交，就暫停而不是偷偷下修價格。
+  if (options.strictPrice && action === 'BUY' && baseTarget >= bestAsk) {
+    throw new Error('原始買價 ' + formatOrderPrice(baseTarget, precision) + ' 已不符合 POST_ONLY（目前賣一 ' + bestAsk + '）；保留原價，不改價送單。');
+  }
+  const finalPrice = options.strictPrice
+    ? baseTarget
+    : (action === 'SELL'
+      ? Math.max(baseTarget, roundPriceToPrecision(makerBoundary, precision, 'ceil'))
+      : Math.min(baseTarget, roundPriceToPrecision(makerBoundary, precision, 'floor')));
   if (!(finalPrice > 0)) throw new Error('計算出的 Maker 價格無效：' + pair.toUpperCase() + ' ' + action + ' ' + finalPrice);
   if (action === 'SELL' && finalPrice + 1e-12 < baseTarget) throw new Error('賣價低於原定最低賣價，已阻止掛單。');
   if (action === 'BUY' && finalPrice - 1e-12 > baseTarget) throw new Error('買價高於原定最高買價，已阻止掛單。');
@@ -682,7 +688,15 @@ async function placeCounterOrder(fill) {
     emit('error', { message: '反向委託失敗：交易對不在支援清單 ' + fill.pair });
     return;
   }
-  const target = calculateTarget(fill.pair, fill.price, fill.action);
+  const gridId = fill.gridId || ('GRID-' + crypto.randomUUID());
+  const originalBuyPrice = Number(fill.originalBuyPrice || (fill.action === 'BUY' ? fill.price : 0));
+  const originalSpread = Number(fill.originalSpread ?? SPREADS[fill.pair]);
+  const restoringOriginalBuy = fill.action === 'SELL' && originalBuyPrice > 0;
+  const target = restoringOriginalBuy
+    ? { action: 'BUY', price: String(originalBuyPrice) }
+    : (fill.action === 'BUY' && fill.gridId && originalBuyPrice > 0
+      ? { action: 'SELL', price: String(originalBuyPrice + originalSpread) }
+      : calculateTarget(fill.pair, fill.price, fill.action));
   if (!target) {
     logOrderConsole('error', '反向委託失敗：無法計算目標價格', { pair: fill.pair, sourceAction: fill.action, sourcePrice: fill.price, spread: SPREADS[fill.pair], status: 'FAILED' });
     emit('warning', { message: '無法計算反向掛單價格：' + fill.pair });
@@ -695,6 +709,7 @@ async function placeCounterOrder(fill) {
     return;
   }
   const originalTargetPrice = Number(target.price);
+  const strictOriginalBuyPrice = restoringOriginalBuy;
   const sourceOrderKey = fill.sourceOrderKey || null;
   let lastError = null;
   let lastMakerQuote = null;
@@ -708,7 +723,7 @@ async function placeCounterOrder(fill) {
   const maxAttempts = LIVE_TRADING ? 3 : 1;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     lastAttempt = attempt;
-    try { lastMakerQuote = await getMakerSafeCounterPrice(fill.pair, target.action, originalTargetPrice); }
+    try { lastMakerQuote = await getMakerSafeCounterPrice(fill.pair, target.action, originalTargetPrice, { strictPrice: strictOriginalBuyPrice }); }
     catch (err) {
       lastError = err;
       logOrderConsole('error', '反向委託失敗：取得 Maker 安全價格失敗', { pair: fill.pair, action: target.action, attempt, error: err.message, status: 'FAILED' });
@@ -720,9 +735,11 @@ async function placeCounterOrder(fill) {
     const estimatedFee = (Math.abs(Number(fill.price) * amount) + Math.abs(price * amount)) * FEE_RATE;
     const entry = {
       category: 'counter_order_signal', pair: fill.pair,
+      gridId, originalBuyPrice: originalBuyPrice || null, originalSpread,
+      restoresOriginalBuyPrice: strictOriginalBuyPrice,
       sourceOrderId: fill.sourceOrderId || fill.orderId || null, sourceOrderKey,
       sourceAction: fill.action, sourcePrice: Number(fill.price), targetPrice: lastMakerQuote.targetPrice,
-      action: target.action, price, amount, spread: SPREADS[fill.pair],
+      action: target.action, price, amount, spread: originalSpread,
       bestBidAtSubmit: lastMakerQuote.bestBid, bestAskAtSubmit: lastMakerQuote.bestAsk, priceTick: lastMakerQuote.tick,
       estimatedGross, estimatedFee, estimatedNet: estimatedGross - estimatedFee,
       live: LIVE_TRADING, result: LIVE_TRADING ? 'pending' : 'dry_run'
@@ -763,7 +780,7 @@ async function placeCounterOrder(fill) {
   }
   const message = lastError ? (lastError.response ? apiErrorMessage(lastError) : '連線中斷或逾時，無法確認交易所是否已接受委託；請先刷新掛單，避免重複下單。') : '無法取得最新買賣盤，已停止送單。';
   const failedPrice = lastMakerQuote?.price ?? originalTargetPrice;
-  addJournal({ category: 'counter_order_signal', pair: fill.pair, sourceOrderId: fill.sourceOrderId || fill.orderId || null, sourceOrderKey, sourceAction: fill.action, sourcePrice: Number(fill.price), targetPrice: originalTargetPrice, action: target.action, price: failedPrice, amount, spread: SPREADS[fill.pair], live: LIVE_TRADING, result: 'error', error: message, httpStatus: lastError?.response?.status || null, retryCount: Math.max(0, lastAttempt - 1) });
+  addJournal({ category: 'counter_order_signal', pair: fill.pair, gridId, originalBuyPrice: originalBuyPrice || null, originalSpread, restoresOriginalBuyPrice: strictOriginalBuyPrice, sourceOrderId: fill.sourceOrderId || fill.orderId || null, sourceOrderKey, sourceAction: fill.action, sourcePrice: Number(fill.price), targetPrice: originalTargetPrice, action: target.action, price: failedPrice, amount, spread: originalSpread, live: LIVE_TRADING, result: 'error', error: message, httpStatus: lastError?.response?.status || null, retryCount: Math.max(0, lastAttempt - 1) });
   logOrderConsole('error', '建立訂單最終狀態：失敗', { pair: fill.pair, action: target.action, amount, targetPrice: originalTargetPrice, price: failedPrice, httpStatus: lastError?.response?.status || null, error: message, status: 'FAILED' });
   emit('error', { message: '反向 Maker 委託建立失敗：' + message });
 }
@@ -844,6 +861,21 @@ async function handleCompletedOrder(pair, item, source = 'unknown') {
     return;
   }
   const dedupeKey = `${pair}|${sourceOrderId}|${action}|${item.price}|${item.executedAmount}`;
+  // 系統反向單沿用原格子的 ID、原始買價及原始價差。
+  const parentSignal = journal.find(entry =>
+    entry.category === 'counter_order_signal' &&
+    String(entry.orderId || '') === sourceOrderId &&
+    String(entry.pair || '').toLowerCase() === pair.toLowerCase()
+  );
+  const gridContext = parentSignal?.gridId ? {
+    gridId: parentSignal.gridId,
+    originalBuyPrice: Number(parentSignal.originalBuyPrice),
+    originalSpread: Number(parentSignal.originalSpread ?? parentSignal.spread)
+  } : (action === 'BUY' ? {
+    gridId: 'GRID-' + crypto.randomUUID(),
+    originalBuyPrice: price,
+    originalSpread: Number(SPREADS[pair])
+  } : null);
   if (seenFills.has(dedupeKey) || journal.some(entry =>
     entry.category === 'counter_order_signal' && entry.sourceOrderKey === dedupeKey
   )) {
@@ -859,9 +891,15 @@ async function handleCompletedOrder(pair, item, source = 'unknown') {
   });
   emit('fill', { message: '完整委託：' + pair.toUpperCase() + ' ' + action + ' ' + executedAmount + ' @ ' + item.price });
   try {
+    if (action === 'SELL' && !gridContext) {
+      emit('warning', { message: '賣單已成交，但找不到對應格子的原始買價；為避免猜價，不自動建立下一張買單。來源訂單：' + sourceOrderId });
+      addJournal({ category: 'grid_cycle_warning', pair, sourceOrderId, sourceOrderKey: dedupeKey, result: 'missing_grid_context', message: '缺少原始買價，未自動恢復買單。' });
+      return;
+    }
     await placeCounterOrder({
       pair, price, action, originalAmount: executedAmount, executedAmount,
-      sourceOrderId, sourceOrderKey: dedupeKey
+      sourceOrderId, sourceOrderKey: dedupeKey,
+      ...(gridContext || {})
     });
   } catch (err) {
     if (!journal.some(entry => entry.category === 'counter_order_signal' && entry.sourceOrderKey === dedupeKey)) {
