@@ -1167,64 +1167,67 @@ function dailySummary() {
     }
   }
 
-  // FIFO inventory matching across dates. Profit is realized on the sell date.
-  // A sell only realizes profit against previously recorded buy inventory.
-  const chronological = [...fillRows].sort((a, b) =>
-    (Date.parse(toIsoTimestamp(a.exchangeTime || a.time) || a.time) || 0) -
-    (Date.parse(toIsoTimestamp(b.exchangeTime || b.time) || b.time) || 0)
-  );
-  const buyQueues = new Map();
-  for (const e of chronological) {
+  // 以策略反向委託的 sourceOrderId -> counter orderId 關係配對。
+  // 不再用全帳戶 FIFO 把不相關／跨策略的 BUY 庫存配給 SELL，避免毛利被放大。
+  // 只有來源訂單與其反向訂單都存在實際成交紀錄時，才計入已完成配對毛利。
+  const orderFills = new Map();
+  for (const e of fillRows) {
     const pair = String(e.pair || '').toLowerCase();
-    if (!pair) continue;
-    const action = String(e.action || '').toUpperCase();
-    const amount = Number(e.amount);
-    const price = Number(e.price);
-    const savedFeeTwd = Number(e.feeTwdCost);
-    const bitoPrice = Number(e.feeBitoTwdPrice);
-    const feeTwd = Number.isFinite(savedFeeTwd) && savedFeeTwd >= 0
-      ? savedFeeTwd
-      : (String(e.feeCurrency || '').toUpperCase() === 'BITO' &&
-         Number(e.fee) > 0 && Number.isFinite(bitoPrice) && bitoPrice > 0
-          ? Number(e.fee) * bitoPrice
-          : NaN);
-    const feeKnown = Number.isFinite(feeTwd) && feeTwd >= 0;
-    const item = {
-      remaining: amount, originalAmount: amount, price,
-      feeRemaining: feeKnown ? feeTwd : null,
-      feeKnown, day: eventDay(e)
-    };
-    if (action === 'BUY') {
-      if (!buyQueues.has(pair)) buyQueues.set(pair, []);
-      buyQueues.get(pair).push(item);
-      continue;
-    }
-    if (action !== 'SELL') continue;
-    let remainingSell = amount;
-    const queue = buyQueues.get(pair) || [];
-    const sellDay = eventDay(e);
-    let matchedTotal = 0;
-    let grossTotal = 0;
-    while (remainingSell > 1e-10 && queue.length) {
-      const buy = queue[0];
-      const matched = Math.min(remainingSell, buy.remaining);
-      if (!(matched > 0)) { queue.shift(); continue; }
-      const gross = (price - buy.price) * matched;
-      grossTotal += gross;
-      matchedTotal += matched;
-      if (buy.feeKnown && buy.feeRemaining != null) {
-        const feePart = buy.feeRemaining * (matched / buy.remaining);
-        buy.feeRemaining -= feePart;
+    const orderId = e.orderId == null ? '' : String(e.orderId).trim();
+    if (!pair || !orderId) continue;
+    const key = `${pair}|${orderId}`;
+    if (!orderFills.has(key)) orderFills.set(key, []);
+    orderFills.get(key).push(e);
+  }
+
+  const completedPairKeys = new Set();
+  for (const signal of journal) {
+    if (signal.category !== 'counter_order_signal') continue;
+    if (!['exchange_accepted', 'submitted'].includes(signal.result)) continue;
+    const pair = String(signal.pair || '').toLowerCase();
+    const sourceOrderId = signal.sourceOrderId == null ? '' : String(signal.sourceOrderId).trim();
+    const counterOrderId = signal.orderId == null ? '' : String(signal.orderId).trim();
+    if (!pair || !sourceOrderId || !counterOrderId || sourceOrderId === counterOrderId) continue;
+
+    const pairKey = `${pair}|${sourceOrderId}|${counterOrderId}`;
+    if (completedPairKeys.has(pairKey)) continue;
+    completedPairKeys.add(pairKey);
+
+    const sourceRows = orderFills.get(`${pair}|${sourceOrderId}`) || [];
+    const counterRows = orderFills.get(`${pair}|${counterOrderId}`) || [];
+    if (!sourceRows.length || !counterRows.length) continue;
+
+    const summarize = rows => {
+      let amount = 0;
+      let quote = 0;
+      let latestTime = 0;
+      let latestDay = '';
+      for (const row of rows) {
+        const qty = Number(row.amount);
+        const price = Number(row.price);
+        if (!(qty > 0) || !(price > 0)) continue;
+        amount += qty;
+        quote += qty * price;
+        const stamp = Date.parse(toIsoTimestamp(row.exchangeTime || row.time) || '');
+        if (Number.isFinite(stamp) && stamp >= latestTime) {
+          latestTime = stamp;
+          latestDay = eventDay(row);
+        }
       }
-      buy.remaining -= matched;
-      remainingSell -= matched;
-      if (buy.remaining <= 1e-10) queue.shift();
-    }
-    if (matchedTotal > 0) {
-      const d = ensureDay(sellDay);
-      d.estimatedGross += grossTotal;
-      d.matchedAmount += matchedTotal;
-    }
+      return { amount, averagePrice: amount > 0 ? quote / amount : 0, latestTime, latestDay };
+    };
+
+    const source = summarize(sourceRows);
+    const counter = summarize(counterRows);
+    const matched = Math.min(source.amount, counter.amount);
+    if (!(matched > 0) || !(source.averagePrice > 0) || !(counter.averagePrice > 0)) continue;
+
+    // 使用兩邊實際成交的加權平均價差；按反向單完成配對的日期入帳。
+    const completionDay = counter.latestDay || source.latestDay;
+    const d = ensureDay(completionDay);
+    if (!d) continue;
+    d.estimatedGross += Math.abs(source.averagePrice - counter.averagePrice) * matched;
+    d.matchedAmount += matched;
   }
 
   // 每日淨利統一採「當日已配對毛利－當日實際成交手續費（BITO 換算台幣）」。
