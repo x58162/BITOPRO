@@ -1236,15 +1236,7 @@ function dailySummary() {
     d.estimatedNet = d.estimatedGross - d.estimatedFees;
   }
 
-  // Carry unmatched buy quantity into the latest date for visibility.
-  const today = taipeiDate(new Date());
-  const latestDay = Object.keys(map).sort().at(-1) || today;
-  const latest = ensureDay(latestDay);
-  if (latest) {
-    for (const queue of buyQueues.values()) {
-      for (const buy of queue) latest.unmatchedBuyAmount += Math.max(0, buy.remaining);
-    }
-  }
+  // 未配對庫存不再用 FIFO 方式推算每日策略毛利。
 
   const rows = Object.values(map).sort((a, b) => b.date.localeCompare(a.date));
   // Keep a standalone persisted snapshot, regenerated from journal source-of-truth.
