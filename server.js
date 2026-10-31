@@ -1149,11 +1149,20 @@ function dailySummary() {
       countedOrderKeys.add(orderKey);
       d.fills++;
     }
-    const feeTwd = Number(e.feeTwdCost);
-    if (Number.isFinite(feeTwd) && feeTwd >= 0) {
+    // 手續費以 BITO 支付時，統一換算成台幣後才納入統計。
+    // 優先使用已保存的 feeTwdCost；舊資料若只有 BITO 價格，則即時計算 fee × BITO/TWD。
+    const savedFeeTwd = Number(e.feeTwdCost);
+    const bitoPrice = Number(e.feeBitoTwdPrice);
+    const feeTwd = Number.isFinite(savedFeeTwd) && savedFeeTwd >= 0
+      ? savedFeeTwd
+      : (String(e.feeCurrency || '').toUpperCase() === 'BITO' &&
+         Number(e.fee) > 0 && Number.isFinite(bitoPrice) && bitoPrice > 0
+          ? Number(e.fee) * bitoPrice
+          : null);
+    if (feeTwd != null) {
       d.estimatedFees += feeTwd;
     } else if (Number(e.fee) > 0 && String(e.feeCurrency || '').toUpperCase() === 'BITO') {
-      // Expose missing conversions instead of presenting a deceptively low fee total.
+      // 歷史 BITO/TWD 價格尚未取得時，標記待補，不拿目前價格冒充成交當時價格。
       d.feePending++;
     }
   }
@@ -1171,7 +1180,14 @@ function dailySummary() {
     const action = String(e.action || '').toUpperCase();
     const amount = Number(e.amount);
     const price = Number(e.price);
-    const feeTwd = Number(e.feeTwdCost);
+    const savedFeeTwd = Number(e.feeTwdCost);
+    const bitoPrice = Number(e.feeBitoTwdPrice);
+    const feeTwd = Number.isFinite(savedFeeTwd) && savedFeeTwd >= 0
+      ? savedFeeTwd
+      : (String(e.feeCurrency || '').toUpperCase() === 'BITO' &&
+         Number(e.fee) > 0 && Number.isFinite(bitoPrice) && bitoPrice > 0
+          ? Number(e.fee) * bitoPrice
+          : NaN);
     const feeKnown = Number.isFinite(feeTwd) && feeTwd >= 0;
     const item = {
       remaining: amount, originalAmount: amount, price,
@@ -1187,11 +1203,8 @@ function dailySummary() {
     let remainingSell = amount;
     const queue = buyQueues.get(pair) || [];
     const sellDay = eventDay(e);
-    const sellFeeTotal = feeKnown ? feeTwd : null;
     let matchedTotal = 0;
     let grossTotal = 0;
-    let buyFeeMatched = 0;
-    let allMatchedFeesKnown = feeKnown;
     while (remainingSell > 1e-10 && queue.length) {
       const buy = queue[0];
       const matched = Math.min(remainingSell, buy.remaining);
@@ -1201,10 +1214,7 @@ function dailySummary() {
       matchedTotal += matched;
       if (buy.feeKnown && buy.feeRemaining != null) {
         const feePart = buy.feeRemaining * (matched / buy.remaining);
-        buyFeeMatched += feePart;
         buy.feeRemaining -= feePart;
-      } else {
-        allMatchedFeesKnown = false;
       }
       buy.remaining -= matched;
       remainingSell -= matched;
@@ -1214,11 +1224,13 @@ function dailySummary() {
       const d = ensureDay(sellDay);
       d.estimatedGross += grossTotal;
       d.matchedAmount += matchedTotal;
-      if (allMatchedFeesKnown && sellFeeTotal != null) {
-        const matchedSellFee = sellFeeTotal * (matchedTotal / amount);
-        d.estimatedNet += grossTotal - buyFeeMatched - matchedSellFee;
-      }
     }
+  }
+
+  // 每日淨利統一採「當日已配對毛利－當日實際成交手續費（BITO 換算台幣）」。
+  // 不在 FIFO 配對時重複扣買入端手續費，避免跨日配對造成每日淨利與手續費欄位對不起來。
+  for (const d of Object.values(map)) {
+    d.estimatedNet = d.estimatedGross - d.estimatedFees;
   }
 
   // Carry unmatched buy quantity into the latest date for visibility.
