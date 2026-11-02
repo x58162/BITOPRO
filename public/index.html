@@ -124,6 +124,13 @@ function getBalanceBaselines(rows) {
 
 
 let marketChart=null, marketCandleSeries=null, marketVolumeChart=null, marketVolumeSeries=null, marketLoadBusy=false, marketLastLoadedAt=0, marketViewKey='', marketHasInitialView=false;
+let latestMarketPair='', latestMarketPrice=null, orderPriceManuallyEdited=false;
+function syncOrderPriceFromMarket(){
+  const orderPair=$('orderPair')?.value;
+  const priceInput=$('orderPrice');
+  if(!priceInput||orderPriceManuallyEdited||!orderPair||orderPair!==latestMarketPair||!(Number(latestMarketPrice)>0))return;
+  priceInput.value=String(latestMarketPrice);
+}
 const marketFormat=(value,digits=8)=>Number.isFinite(Number(value))?Number(value).toLocaleString('zh-TW',{maximumFractionDigits:digits}):'—';
 function initMarketChart(){
   if(!window.LightweightCharts||!$('marketChart')||!$('marketVolumeChart'))return;
@@ -169,6 +176,9 @@ async function loadMarket(manual=false){
       marketHasInitialView=true;
     }
     const t=d.ticker||{};
+    latestMarketPair=pair;
+    latestMarketPrice=Number(t.lastPrice);
+    syncOrderPriceFromMarket();
     $('marketLastPrice').textContent=marketFormat(t.lastPrice,8);
     const change=Number(t.changeRate??t.change??NaN);
     $('marketChange').textContent=Number.isFinite(change)?(change>0?'+':'')+marketFormat(change,4)+'%':'—';
@@ -274,9 +284,12 @@ function initOrderPairSelect(){
   const pairs=Object.keys(state.spreads||{});
   const sel=$('orderPair');
   if(sel){const old=sel.value;sel.innerHTML=pairs.map(p=>`<option value="${esc(p)}">${esc(p.toUpperCase())}</option>`).join('');if(pairs.includes(old))sel.value=old;else if(pairs.includes('usdt_twd'))sel.value='usdt_twd';}
+  syncOrderPriceFromMarket();
   const filter=$('orderFilterPair');
   if(filter){const oldFilter=filter.value;filter.innerHTML='<option value="">全部交易對</option>'+pairs.map(p=>`<option value="${esc(p)}">${esc(p.toUpperCase())}</option>`).join('');if(oldFilter===''||pairs.includes(oldFilter))filter.value=oldFilter;}
 }
+$('orderPair')?.addEventListener('change',syncOrderPriceFromMarket);
+$('orderPrice')?.addEventListener('input',()=>{orderPriceManuallyEdited=true;});
 let exchangeOrdersLoading = false;
 let exchangeOrdersLastLoadedAt = 0;
 async function loadExchangeOrders(options={}){
