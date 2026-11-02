@@ -131,7 +131,7 @@ function requireTrade(req, res, next) {
   if (!isTradeUnlocked(session)) {
     return res.status(423).json({
       ok: false,
-      error: '下單功能尚未解鎖，請在交易所真實掛單管理輸入 Authenticator 驗證碼解鎖 10 分鐘',
+      error: '受保護操作尚未解鎖，請輸入 Authenticator 驗證碼解鎖 10 分鐘',
       code: 'TRADE_LOCKED'
     });
   }
@@ -141,8 +141,11 @@ function requireTrade(req, res, next) {
 function apiGate(req, res, next) {
   if (!req.path.startsWith('/api/')) return next();
   if (req.path.startsWith('/api/security/')) return next();
+  // 真實委託與策略設定修改共用同一個 Authenticator 解鎖狀態。
   if (req.path === '/api/orders' && req.method === 'POST') return requireTrade(req, res, next);
   if (req.path.startsWith('/api/orders/') && ['PUT', 'DELETE'].includes(req.method)) return requireTrade(req, res, next);
+  if (req.path === '/api/spreads' && req.method === 'POST') return requireTrade(req, res, next);
+  if (req.path === '/api/pairs' && req.method === 'POST') return requireTrade(req, res, next);
   return next();
 }
 module.exports = { router, apiGate, requireTrade, sessions, anySessionUnlocked };
