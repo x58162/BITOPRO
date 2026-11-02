@@ -21,8 +21,16 @@ footer{color:var(--muted);font-size:12px;text-align:center;padding:4px 0 18px}
 tr.balance-up td{color:var(--green);background:rgba(22,163,74,.08)}tr.balance-down td{color:var(--red);background:rgba(220,38,38,.08)}
 .market-card{padding:16px}.market-heading{align-items:flex-end}.market-controls{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap}.market-controls label{display:grid;gap:4px;color:var(--muted);font-size:12px}.market-controls select{padding:9px;background:#0b1324;border:1px solid #34445f;border-radius:8px;color:var(--text)}.market-summary{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin:16px 0}.market-summary>div{background:#0d1526;border:1px solid #26334d;border-radius:10px;padding:11px;min-width:0}.market-summary strong{display:block;font-size:17px;margin-top:5px;overflow-wrap:anywhere}.market-layout{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:12px}.market-chart-wrap{position:relative;min-width:0;background:#0b0e14;border:1px solid #26334d;border-radius:10px;overflow:hidden}.market-chart-wrap #marketChart{height:340px;width:100%}.market-volume-panel{border-top:1px solid #303744;background:#0b0e14}.market-volume-title{padding:7px 12px 0;color:#9eacc7;font-size:11px}.market-chart-wrap #marketVolumeChart{height:150px;width:100%}.market-status{position:absolute;left:12px;bottom:8px;color:#9eacc7;font-size:11px;pointer-events:none}.market-side{display:grid;grid-template-rows:auto minmax(0,1fr);gap:12px;min-width:0}.market-side section{background:#0d1526;border:1px solid #26334d;border-radius:10px;padding:10px;min-width:0;overflow:hidden}.market-side h3{margin:0 0 10px;font-size:13px;display:flex;justify-content:space-between}.market-side h3 small{color:var(--muted);font-weight:400}.market-table-head,.market-depth-row,.market-trade-row{display:grid;grid-template-columns:1fr .85fr 1fr;gap:6px;font-size:11px;padding:5px 2px}.market-table-head{color:var(--muted);border-bottom:1px solid #26334d}.market-table-head span:nth-child(2),.market-table-head span:nth-child(3),.market-depth-row span:nth-child(2),.market-depth-row span:nth-child(3),.market-trade-row span:nth-child(2),.market-trade-row span:nth-child(3){text-align:right}.market-depth{max-height:160px;overflow:auto}.market-depth-row.ask{color:#ff7185}.market-depth-row.bid{color:#4de0a0}.market-mid-price{text-align:center;font-size:19px;font-weight:800;padding:8px 0;border-top:1px solid #26334d;border-bottom:1px solid #26334d}.market-trades{max-height:235px;overflow:auto}.market-trade-row{border-bottom:1px solid rgba(38,51,77,.55)}.market-trade-row.buy{color:#4de0a0}.market-trade-row.sell{color:#ff7185}.market-footnote{font-size:11px;color:var(--muted);margin-top:10px}.market-depth .empty,.market-trades .empty{padding:12px;font-size:11px}@media(max-width:1000px){.market-layout{grid-template-columns:1fr}.market-side{grid-template-columns:1fr 1fr;align-items:start}.market-chart-wrap #marketChart{height:420px}}@media(max-width:600px){.market-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.market-side{grid-template-columns:1fr}.market-controls{width:100%}.market-controls label{flex:1}.market-chart-wrap #marketChart{height:340px}}
 </style>
-</head>
-<body>
+<style>
+#authGate{position:fixed;inset:0;z-index:20000;background:#080d19;display:flex;align-items:center;justify-content:center;padding:20px;color:#eef3ff;font-family:system-ui}
+#authGate .auth-card{width:min(440px,100%);background:#121a2c;border:1px solid #34445f;border-radius:18px;padding:24px;text-align:center;box-shadow:0 20px 70px #0009}
+#authGate h2{font-size:21px;margin:0 0 10px}#authGate p{color:#aab8d0;font-size:13px}
+#authGate input{width:100%;padding:13px;margin:9px 0;background:#0b1324;border:1px solid #40516f;border-radius:9px;color:#fff;font-size:20px;text-align:center;letter-spacing:5px}
+#authGate button{width:100%;margin-top:9px;padding:12px;background:#8ab6ff;color:#0b1425;border:0;border-radius:9px;font-weight:800}
+#authGate img{width:240px;height:240px;background:white;padding:8px;border-radius:10px;max-width:100%}
+#authGate .auth-error{color:#ff8796;min-height:22px}#authGate .auth-key{font-size:11px;overflow-wrap:anywhere;color:#f4c66b}
+</style></head>
+<body><div id="authGate"><div class="auth-card"><h2 id="authTitle">BITOPRO 安全驗證</h2><p id="authDesc">正在檢查本機 Authenticator 設定…</p><div id="authQrArea"></div><input id="authCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="輸入 6 位數驗證碼" style="display:none"><button id="authAction" style="display:none">確認</button><p class="auth-error" id="authError"></p><p style="font-size:11px">驗證器只綁定在這台電腦的本機安裝資料中。</p></div></div>
 <header><div class="brand"><div class="logo">B</div><div><h1>BitoPro 套利管理台</h1><p>交易監控・每日紀錄・策略觀察</p></div></div><div class="actions"><a class="btn" href="/api/export.csv">匯出 CSV</a><button onclick="refreshBalance()">更新餘額</button></div></header>
 <main class="wrap">
 
@@ -360,4 +368,31 @@ loadExchangeOrders();
 setInterval(()=>loadExchangeOrders({silent:true}),10000);
 $('orderFilterPair')?.addEventListener('change',()=>loadExchangeOrders());
 </script>
-</body></html>
+<script>
+(function(){
+ const $=id=>document.getElementById(id), gate=$('authGate');
+ let mode=''; let busy=false;
+ async function req(path,body={}){const r=await fetch('/api/security/'+path,{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify(body)});const d=await r.json();if(!r.ok)throw new Error(d.error||'驗證失敗');return d;}
+ function show(title,desc,button,showCode=true){$('authTitle').textContent=title;$('authDesc').textContent=desc;$('authAction').textContent=button;$('authAction').style.display='block';$('authCode').style.display=showCode?'block':'none';$('authCode').value='';}
+ async function boot(){
+  try{
+   const r=await fetch('/api/security/status',{credentials:'same-origin'}),s=await r.json();
+   if(s.authenticated){gate.remove();return;}
+   if(!s.configured){
+    mode='setup';show('首次綁定 Authenticator','請用 Google Authenticator 掃描下方 QR Code，再輸入 App 顯示的 6 位數驗證碼。','完成綁定');
+    const q=await req('setup/start');$('authQrArea').innerHTML='<img alt="Authenticator QR Code" src="'+q.qr+'"><p class="auth-key">手動輸入金鑰：'+q.manualEntryKey+'</p>';
+   }else{mode='login';show('Authenticator 登入','輸入你已綁定的 Google Authenticator 目前 6 位數驗證碼。','登入');}
+  }catch(e){$('authDesc').textContent='無法初始化安全驗證';$('authError').textContent=e.message;}
+ }
+ $('authAction').addEventListener('click',async()=>{
+  if(busy)return;busy=true;$('authAction').disabled=true;$('authError').textContent='';
+  try{
+   const code=$('authCode').value.trim();if(!/^\d{6}$/.test(code))throw new Error('請輸入 6 位數驗證碼');
+   await req(mode==='setup'?'setup/confirm':'login',{code});
+   gate.remove();location.reload();
+  }catch(e){$('authError').textContent=e.message;}
+  finally{busy=false;if($('authAction'))$('authAction').disabled=false;}
+ });
+ boot();
+})();
+</script></body></html>
