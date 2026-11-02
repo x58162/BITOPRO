@@ -8,6 +8,9 @@ const path = require('path');
 
 const app = express();
 app.use(express.json());
+const localSecurity = require('./security/http');
+app.use('/api/security', localSecurity.router);
+app.use(localSecurity.apiGate);
 app.use(express.static(path.join(__dirname, 'public')));
 
 const PORT = Number(process.env.PORT || 3001);
