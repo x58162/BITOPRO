@@ -793,11 +793,14 @@ async function placeCounterOrder(fill) {
       await new Promise(resolve => setTimeout(resolve, 300 * attempt));
     }
   }
-  const message = lastError ? (lastError.response ? apiErrorMessage(lastError) : '連線中斷或逾時，無法確認交易所是否已接受委託；請先刷新掛單，避免重複下單。') : '無法取得最新買賣盤，已停止送單。';
+  const isUnknown = !!(lastError && !lastError.response);
+  const message = lastError ? (isUnknown
+    ? '連線中斷或逾時，交易所是否接受委託尚未確認；已停止重送並鎖定此來源成交，請先查詢交易所掛單與委託歷史。'
+    : apiErrorMessage(lastError)) : '無法取得最新買賣盤，已停止送單。';
   const failedPrice = lastMakerQuote?.price ?? originalTargetPrice;
-  addJournal({ category: 'counter_order_signal', pair: fill.pair, gridId, originalBuyPrice: originalBuyPrice || null, originalSellPrice: originalSellPrice || null, originalSpread, restoresOriginalBuyPrice: strictOriginalBuyPrice, sourceOrderId: fill.sourceOrderId || fill.orderId || null, sourceOrderKey, sourceAction: fill.action, sourcePrice: Number(fill.price), targetPrice: originalTargetPrice, action: target.action, price: failedPrice, amount, spread: originalSpread, live: LIVE_TRADING, result: 'error', error: message, httpStatus: lastError?.response?.status || null, retryCount: Math.max(0, lastAttempt - 1) });
-  logOrderConsole('error', '建立訂單最終狀態：失敗', { pair: fill.pair, action: target.action, amount, targetPrice: originalTargetPrice, price: failedPrice, httpStatus: lastError?.response?.status || null, error: message, status: 'FAILED' });
-  emit('error', { message: '反向 Maker 委託建立失敗：' + message });
+  addJournal({ category: 'counter_order_signal', pair: fill.pair, gridId, originalBuyPrice: originalBuyPrice || null, originalSellPrice: originalSellPrice || null, originalSpread, restoresOriginalBuyPrice: strictOriginalBuyPrice, sourceOrderId: fill.sourceOrderId || fill.orderId || null, sourceOrderKey, sourceAction: fill.action, sourcePrice: Number(fill.price), targetPrice: originalTargetPrice, action: target.action, price: failedPrice, amount, spread: originalSpread, live: LIVE_TRADING, result: isUnknown ? 'unknown' : 'error', error: message, statusNeedsReconciliation: isUnknown, httpStatus: lastError?.response?.status || null, retryCount: Math.max(0, lastAttempt - 1) });
+  logOrderConsole(isUnknown ? 'warn' : 'error', isUnknown ? '建立訂單結果不明：等待人工核對' : '建立訂單最終狀態：失敗', { pair: fill.pair, action: target.action, amount, targetPrice: originalTargetPrice, price: failedPrice, httpStatus: lastError?.response?.status || null, error: message, status: isUnknown ? 'UNKNOWN_NEEDS_RECONCILIATION' : 'FAILED' });
+  emit(isUnknown ? 'warning' : 'error', { message: (isUnknown ? '反向 Maker 委託結果待核對：' : '反向 Maker 委託建立失敗：') + message });
 }
 function processHistoryMessage(raw) {
   const rawText = raw.toString();
