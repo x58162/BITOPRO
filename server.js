@@ -771,6 +771,9 @@ async function placeCounterOrder(fill) {
     const attemptPayload = { ...payload, timestamp: apiTimestamp() };
     logOrderConsole('info', '反向 Maker 委託建立中（第 ' + attempt + '/' + maxAttempts + ' 次）', { pair: fill.pair, action: target.action, amount, targetPrice: lastMakerQuote.targetPrice, price, bestBid: lastMakerQuote.bestBid, bestAsk: lastMakerQuote.bestAsk, tick: lastMakerQuote.tick, timestamp: attemptPayload.timestamp });
     try {
+      if (!localSecurity.anySessionUnlocked()) {
+        throw new Error('交易授權已鎖定：自動反向委託暫停，請在掛單管理區解鎖後再送單。');
+      }
       const response = await axios.post('https://api.bitopro.com/v3/orders/' + fill.pair, attemptPayload, { headers: signedOrderHeaders(attemptPayload, true), timeout: 15000 });
       const result = response.data?.data ?? response.data;
       const orderId = result?.orderId || result?.id || result?.order_id || null;
@@ -1556,8 +1559,8 @@ app.get('/api/export.csv', (req, res) => {
   res.setHeader('Content-Disposition', 'attachment; filename="bito-daily-stats.csv"');
   res.send('\ufeff' + rows.join('\r\n'));
 });
-const server = app.listen(PORT, () => {
-  console.log(`Dashboard: http://localhost:${PORT}`);
+const server = app.listen(PORT, '127.0.0.1', () => {
+  console.log(`Dashboard: http://127.0.0.1:${PORT}`);
   // 成交紀錄與策略下單分離：服務啟動後自動補登歷史成交並連線成交事件，
   // 不再要求使用者按「啟動監控」，也不會因此自動啟動反向策略下單。
   running = true;
