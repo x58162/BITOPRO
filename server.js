@@ -771,9 +771,8 @@ async function placeCounterOrder(fill) {
     const attemptPayload = { ...payload, timestamp: apiTimestamp() };
     logOrderConsole('info', '反向 Maker 委託建立中（第 ' + attempt + '/' + maxAttempts + ' 次）', { pair: fill.pair, action: target.action, amount, targetPrice: lastMakerQuote.targetPrice, price, bestBid: lastMakerQuote.bestBid, bestAsk: lastMakerQuote.bestAsk, tick: lastMakerQuote.tick, timestamp: attemptPayload.timestamp });
     try {
-      if (!localSecurity.anySessionUnlocked()) {
-        throw new Error('交易授權已鎖定：自動反向委託暫停，請在掛單管理區解鎖後再送單。');
-      }
+      // 系統依完整成交事件與既定格線自動建立反向委託，不要求人工 Authenticator 解鎖。
+      // 手動新增、修改、撤單仍由 security/http.js 的 apiGate 強制驗證。
       const response = await axios.post('https://api.bitopro.com/v3/orders/' + fill.pair, attemptPayload, { headers: signedOrderHeaders(attemptPayload, true), timeout: 15000 });
       const result = response.data?.data ?? response.data;
       const orderId = result?.orderId || result?.id || result?.order_id || null;
