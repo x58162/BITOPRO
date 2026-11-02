@@ -272,7 +272,8 @@ function connectLive(){
       if(msg.kind==='snapshot'&&msg.state){state={...state,...msg.state};render();}
       else if(msg.kind==='event'&&msg.item){
         const item=msg.item;state.events=[item,...(state.events||[])].slice(0,100);
-        if(item.type==='journal'||item.type==='balances'||item.type==='status'){load();return;}
+        if(item.type==='journal'){load().then(()=>loadExchangeOrders({silent:true}));return;}
+        if(item.type==='balances'||item.type==='status'){load();return;}
         if(item.type==='error'){toast('失敗：'+(item.message||item.error||'未知錯誤'));}
         else if(item.type==='warning' && /重試|資產失敗|更新帳戶/i.test(item.message||'')){toast(item.message||'警告');}
         render();
