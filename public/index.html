@@ -302,10 +302,26 @@ function renderOrderLadder(orders,pair,latestTrade){
   const visible=orders.filter(o=>!selectedPair||String(o.pair||selectedPair).toLowerCase()===selectedPair);
   const sells=visible.filter(o=>String(o.action||'').toUpperCase()==='SELL').sort((a,b)=>Number(b.price)-Number(a.price));
   const buys=visible.filter(o=>String(o.action||'').toUpperCase()==='BUY').sort((a,b)=>Number(b.price)-Number(a.price));
-  const tradeAction=String(latestTrade?.action||latestTrade?.side||'').toUpperCase();
-  const tradeSide=['BUY','BID'].includes(tradeAction)?'buy':['SELL','ASK'].includes(tradeAction)?'sell':'';
-  const tradePrice=Number(latestTrade?.price??latestTrade?.matchPrice);
-  const current=tradeSide&&tradePrice>0?'<div class="ladder-current '+tradeSide+'"><div class="ladder-current-label">最新成交位置 · '+selectedPair.toUpperCase()+'</div><div class="ladder-current-price">'+marketFormat(tradePrice,8)+'</div><div class="ladder-current-side">'+(tradeSide==='buy'?'🟢 BUY 買入成交':'🔴 SELL 賣出成交')+'</div></div>':'<div class="ladder-current"><div class="ladder-current-label">目前成交位置</div><div class="ladder-current-price">—</div><div class="ladder-current-label">暫無可辨識的最新成交方向</div></div>';
+  // 以帳戶自己的實際成交紀錄為準，不使用公開市場 trades（其資料未必提供買賣方向）。
+  const ownFills=(Array.isArray(state.journal)?state.journal:[]).filter(x=>
+    x.category==='filled_trade' &&
+    String(x.pair||'').toLowerCase()===selectedPair &&
+    Number(x.price)>0 &&
+    ['BUY','SELL'].includes(String(x.action||'').toUpperCase())
+  );
+  const fillTime=x=>{
+    const raw=x.exchangeTime||x.time||x.timestamp||0;
+    const n=Number(raw);
+    if(Number.isFinite(n)&&n>0)return n<1e12?n*1000:n;
+    const parsed=Date.parse(raw);
+    return Number.isFinite(parsed)?parsed:0;
+  };
+  ownFills.sort((a,b)=>fillTime(b)-fillTime(a));
+  const latestOwnFill=ownFills[0]||null;
+  const tradeAction=String(latestOwnFill?.action||'').toUpperCase();
+  const tradeSide=tradeAction==='BUY'?'buy':tradeAction==='SELL'?'sell':'';
+  const tradePrice=Number(latestOwnFill?.price);
+  const current=tradeSide&&tradePrice>0?'<div class="ladder-current '+tradeSide+'"><div class="ladder-current-label">你的最新實際成交 · '+selectedPair.toUpperCase()+'</div><div class="ladder-current-price">'+marketFormat(tradePrice,8)+'</div><div class="ladder-current-side">'+(tradeSide==='buy'?'🟢 BUY 買入成交':'🔴 SELL 賣出成交')+'</div><div class="ladder-current-label">'+esc(new Date(fillTime(latestOwnFill)).toLocaleString('zh-TW'))+'</div></div>':'<div class="ladder-current"><div class="ladder-current-label">你的最新實際成交 · '+selectedPair.toUpperCase()+'</div><div class="ladder-current-price">—</div><div class="ladder-current-label">尚無此交易對的實際成交紀錄</div></div>';
   const row=(o,side)=>{
     const id=o.id||o.orderId||'',p=String(o.pair||selectedPair).toLowerCase(),ts=Number(o.updatedTimestamp||o.createdTimestamp||Date.now()),action=String(o.action||'').toUpperCase(),price=Number(o.price)||0,original=Number(o.originalAmount)||0,executed=Number(o.executedAmount)||0,remaining=Number(o.remainingAmount??(original-executed))||0;
     return '<div class="ladder-order '+side+'"><div><div class="ladder-price">'+fmt(price,10)+'</div><div class="ladder-meta">'+esc(p.toUpperCase())+' · '+esc(new Date(ts<1e12?ts*1000:ts).toLocaleString())+'</div></div><div><div>'+fmt(remaining,10)+'</div><div class="ladder-meta">剩餘數量</div></div><div><div>'+fmt(executed,10)+' / '+fmt(original,10)+'</div><div class="ladder-meta">已成交 / 原始</div></div><div><div>'+esc(id)+'</div><div class="ladder-meta">訂單 ID</div></div><div class="ladder-actions"><button onclick="editExchangeOrder(\''+esc(p)+'\',\''+esc(id)+'\',\''+esc(action||'BUY')+'\','+price+','+(remaining||original)+')">修改</button><button class="stop" onclick="cancelExchangeOrder(\''+esc(p)+'\',\''+esc(id)+'\')">撤單</button></div></div>';
