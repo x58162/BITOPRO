@@ -907,17 +907,29 @@ async function handleCompletedOrder(pair, item, source = 'unknown') {
     String(entry.orderId || '') === sourceOrderId &&
     String(entry.pair || '').toLowerCase() === pair.toLowerCase()
   );
+  const configuredSpread = Number(SPREADS[pair]);
   const gridContext = parentSignal?.gridId ? {
     gridId: parentSignal.gridId,
     originalBuyPrice: Number(parentSignal.originalBuyPrice),
     originalSellPrice: Number(parentSignal.originalSellPrice || (Number(parentSignal.originalBuyPrice) + Number(parentSignal.originalSpread ?? parentSignal.spread))),
-    originalSpread: Number(parentSignal.originalSpread ?? parentSignal.spread)
+    originalSpread: Number(parentSignal.originalSpread ?? parentSignal.spread),
+    gridContextSource: 'existing_strategy_grid'
   } : (action === 'BUY' ? {
+    // 無論 BUY 來自本網頁或 BitoPro 官方 App／網站，首次成交都建立一組新格線。
     gridId: 'GRID-' + crypto.randomUUID(),
     originalBuyPrice: price,
-    originalSellPrice: price + Number(SPREADS[pair]),
-    originalSpread: Number(SPREADS[pair])
-  } : null);
+    originalSellPrice: price + configuredSpread,
+    originalSpread: configuredSpread,
+    gridContextSource: 'standalone_buy_fill'
+  } : (Number.isFinite(configuredSpread) && configuredSpread >= 0 && price - configuredSpread > 0 ? {
+    // 獨立 SELL 成交（例如官方 App 手動掛單）以成交價為賣格，依目前策略價差推導下一個 BUY 格。
+    // 之後該 BUY 成交時，會沿用這組 gridId 與原始價位，恢復同一格線循環。
+    gridId: 'GRID-' + crypto.randomUUID(),
+    originalBuyPrice: price - configuredSpread,
+    originalSellPrice: price,
+    originalSpread: configuredSpread,
+    gridContextSource: 'standalone_sell_fill'
+  } : null));
   if (seenFills.has(dedupeKey) || journal.some(entry =>
     entry.category === 'counter_order_signal' && entry.sourceOrderKey === dedupeKey
   )) {
@@ -933,10 +945,17 @@ async function handleCompletedOrder(pair, item, source = 'unknown') {
   });
   emit('fill', { message: '完整委託：' + pair.toUpperCase() + ' ' + action + ' ' + executedAmount + ' @ ' + item.price });
   try {
-    if (action === 'SELL' && !gridContext) {
-      emit('warning', { message: '賣單已成交，但找不到對應格子的原始買價；為避免猜價，不自動建立下一張買單。來源訂單：' + sourceOrderId });
-      addJournal({ category: 'grid_cycle_warning', pair, sourceOrderId, sourceOrderKey: dedupeKey, result: 'missing_grid_context', message: '缺少原始買價，未自動恢復買單。' });
+    if (!gridContext) {
+      emit('warning', { message: '成交已確認，但目前價差設定無法建立有效格線價格；未送出反向委託。來源訂單：' + sourceOrderId });
+      addJournal({ category: 'grid_cycle_warning', pair, sourceOrderId, sourceOrderKey: dedupeKey, result: 'invalid_grid_context', message: '無法依目前價差設定建立有效的下一格價格。' });
       return;
+    }
+    if (gridContext.gridContextSource === 'standalone_sell_fill') {
+      logOrderConsole('info', '獨立 SELL 成交已建立新格線，準備自動回補 BUY', {
+        pair, sourceOrderId, fillPrice: price, nextBuyPrice: gridContext.originalBuyPrice,
+        spread: gridContext.originalSpread, gridId: gridContext.gridId
+      });
+      emit('info', { message: '已辨識獨立 SELL 成交並建立新格線：下一格 BUY 目標 ' + gridContext.originalBuyPrice });
     }
     await placeCounterOrder({
       pair, price, action, originalAmount: executedAmount, executedAmount,
