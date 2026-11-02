@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const express = require('express');
 const QRCode = require('qrcode');
-const { authenticator } = require('./authenticator');
+const authenticator = require('./authenticator');
 const { SessionStore } = require('./session');
 const { unlockSession, lockSession, isTradeUnlocked } = require('./trade-guard');
 
