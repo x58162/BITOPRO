@@ -54,7 +54,7 @@ tr.balance-up td{color:var(--green);background:rgba(22,163,74,.08)}tr.balance-do
   </div><div class="market-footnote" id="marketUpdatedAt">行情尚未更新</div>
 </section>
 
-<section class="card"><div class="topline"><h2 style="margin:0">交易所真實掛單管理</h2><div class="actions"><label>掛單篩選<select id="orderFilterPair"><option value="">全部交易對</option></select></label><span class="muted" id="orderAutoRefreshStatus">自動同步中（每 10 秒）</span><button class="primary" type="button" onclick="openSpreadSettings()"><span aria-hidden="true">⚙ </span>策略價差設定</button></div></div><div class="notice" style="margin:12px 0">此區會直接呼叫 BitoPro API。新增會建立真實委託；刪除會撤銷交易所掛單；修改會先撤銷舊單再建立新單（不是原子操作）。請確認交易對、方向、價格、數量後再操作。</div>
+<section class="card"><div class="topline"><h2 style="margin:0">交易所真實掛單管理</h2><div class="actions"><label style="display:inline-flex;align-items:center;gap:6px"><input id="hideOtherPairs" type="checkbox" style="width:auto">只顯示目前幣種</label><label>掛單篩選<select id="orderFilterPair"><option value="">全部交易對</option></select></label><span class="muted" id="orderAutoRefreshStatus">自動同步中（每 10 秒）</span><button class="primary" type="button" onclick="openSpreadSettings()"><span aria-hidden="true">⚙ </span>策略價差設定</button></div></div><div class="notice" style="margin:12px 0">此區會直接呼叫 BitoPro API。新增會建立真實委託；刪除會撤銷交易所掛單；修改會先撤銷舊單再建立新單（不是原子操作）。請確認交易對、方向、價格、數量後再操作。</div>
 <div id="tradeUnlockPanel" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:12px 0;padding:12px;border:1px solid #34445f;border-radius:10px;background:#10192b">
 <strong id="tradeUnlockStatus" style="color:#f4c66b">🔒 下單功能尚未解鎖</strong>
 <button id="tradeUnlockButton" type="button" class="primary">輸入驗證碼，解鎖 10 分鐘</button>
@@ -286,9 +286,11 @@ function initOrderPairSelect(){
   if(sel){const old=sel.value;sel.innerHTML=pairs.map(p=>`<option value="${esc(p)}">${esc(p.toUpperCase())}</option>`).join('');if(pairs.includes(old))sel.value=old;else if(pairs.includes('usdt_twd'))sel.value='usdt_twd';}
   syncOrderPriceFromMarket();
   const filter=$('orderFilterPair');
-  if(filter){const oldFilter=filter.value;filter.innerHTML='<option value="">全部交易對</option>'+pairs.map(p=>`<option value="${esc(p)}">${esc(p.toUpperCase())}</option>`).join('');if(oldFilter===''||pairs.includes(oldFilter))filter.value=oldFilter;}
+  if(filter){const oldFilter=filter.value;filter.innerHTML='<option value="">全部交易對</option>'+pairs.map(p=>`<option value="${esc(p)}">${esc(p.toUpperCase())}</option>`).join('');if($('hideOtherPairs')?.checked){filter.value=sel?.value||'';}else if(oldFilter===''||pairs.includes(oldFilter))filter.value=oldFilter;}
 }
-$('orderPair')?.addEventListener('change',syncOrderPriceFromMarket);
+$('orderPair')?.addEventListener('change',()=>{syncOrderPriceFromMarket();if($('hideOtherPairs')?.checked){const filter=$('orderFilterPair');if(filter){filter.value=$('orderPair')?.value||'';loadExchangeOrders();}}});
+$('hideOtherPairs')?.addEventListener('change',()=>{const filter=$('orderFilterPair');if(!filter)return;filter.value=$('hideOtherPairs').checked?($('orderPair')?.value||''):'';loadExchangeOrders();});
+
 $('orderPrice')?.addEventListener('input',()=>{orderPriceManuallyEdited=true;});
 let exchangeOrdersLoading = false;
 let exchangeOrdersLastLoadedAt = 0;
