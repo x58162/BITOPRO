@@ -374,10 +374,20 @@ $('orderFilterPair')?.addEventListener('change',()=>loadExchangeOrders());
  let mode=''; let busy=false;
  async function req(path,body={}){const r=await fetch('/api/security/'+path,{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify(body)});const d=await r.json();if(!r.ok)throw new Error(d.error||'驗證失敗');return d;}
  function show(title,desc,button,showCode=true){$('authTitle').textContent=title;$('authDesc').textContent=desc;$('authAction').textContent=button;$('authAction').style.display='block';$('authCode').style.display=showCode?'block':'none';$('authCode').value='';}
+ function mountTradeControls(){
+  if(document.getElementById('authTradeTools'))return;
+  const box=document.createElement('div');box.id='authTradeTools';box.style='position:fixed;right:14px;top:14px;z-index:15000;display:flex;gap:8px;align-items:center';
+  const status=document.createElement('span');status.style='background:#172238;border:1px solid #34445f;border-radius:9px;padding:8px 10px;color:#f4c66b;font-size:12px';status.textContent='交易功能：鎖定';
+  const unlock=document.createElement('button');unlock.textContent='解鎖交易 10 分鐘';unlock.style='padding:9px 12px;background:#8ab6ff;color:#0b1425;border:0;border-radius:9px;font-weight:800';
+  const logout=document.createElement('button');logout.textContent='登出';logout.style='padding:9px 12px';
+  unlock.onclick=async()=>{const code=prompt('請輸入 Google Authenticator 目前的 6 位數驗證碼');if(!code)return;try{const d=await req('trade-unlock',{code:code.trim()});status.textContent='交易已解鎖至 '+new Date(d.tradeUnlockedUntil).toLocaleTimeString();unlock.disabled=true;setTimeout(()=>{status.textContent='交易功能：鎖定';unlock.disabled=false;},600000);}catch(e){alert(e.message);}};
+  logout.onclick=async()=>{try{await req('logout');location.reload();}catch(e){alert(e.message);}};
+  box.append(status,unlock,logout);document.body.appendChild(box);
+ }
  async function boot(){
   try{
    const r=await fetch('/api/security/status',{credentials:'same-origin'}),s=await r.json();
-   if(s.authenticated){gate.remove();return;}
+   if(s.authenticated){gate.remove();mountTradeControls();return;}
    if(!s.configured){
     mode='setup';show('首次綁定 Authenticator','請用 Google Authenticator 掃描下方 QR Code，再輸入 App 顯示的 6 位數驗證碼。','完成綁定');
     const q=await req('setup/start');$('authQrArea').innerHTML='<img alt="Authenticator QR Code" src="'+q.qr+'"><p class="auth-key">手動輸入金鑰：'+q.manualEntryKey+'</p>';
