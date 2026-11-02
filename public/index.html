@@ -273,7 +273,7 @@ function connectLive(){
 function initOrderPairSelect(){
   const pairs=Object.keys(state.spreads||{});
   const sel=$('orderPair');
-  if(sel){const old=sel.value;sel.innerHTML=pairs.map(p=>`<option value="${esc(p)}">${esc(p.toUpperCase())}</option>`).join('');if(pairs.includes(old))sel.value=old;}
+  if(sel){const old=sel.value;sel.innerHTML=pairs.map(p=>`<option value="${esc(p)}">${esc(p.toUpperCase())}</option>`).join('');if(pairs.includes(old))sel.value=old;else if(pairs.includes('usdt_twd'))sel.value='usdt_twd';}
   const filter=$('orderFilterPair');
   if(filter){const oldFilter=filter.value;filter.innerHTML='<option value="">全部交易對</option>'+pairs.map(p=>`<option value="${esc(p)}">${esc(p.toUpperCase())}</option>`).join('');if(oldFilter===''||pairs.includes(oldFilter))filter.value=oldFilter;}
 }
