@@ -804,6 +804,64 @@ async function placeCounterOrder(fill) {
   logOrderConsole(isUnknown ? 'warn' : 'error', isUnknown ? '建立訂單結果不明：等待人工核對' : '建立訂單最終狀態：失敗', { pair: fill.pair, action: target.action, amount, targetPrice: originalTargetPrice, price: failedPrice, httpStatus: lastError?.response?.status || null, error: message, status: isUnknown ? 'UNKNOWN_NEEDS_RECONCILIATION' : 'FAILED' });
   emit(isUnknown ? 'warning' : 'error', { message: (isUnknown ? '反向 Maker 委託結果待核對：' : '反向 Maker 委託建立失敗：') + message });
 }
+// WebSocket 首次快照（包含重新連線）到達後，以本機既有訂單 ID 對接交易所狀態。
+// 不重建訂單、不修改原訂單參數；只有交易所確認完整成交才交由既有反向策略處理。
+const reconcilingOrders = new Set();
+async function reconcileExistingOrders(reason = 'websocket_reconnected') {
+  if (!credentialsReady()) return { checked: 0, completed: 0 };
+  const tracked = journal.filter(entry =>
+    entry && entry.orderId && validPair(String(entry.pair || '').toLowerCase()) &&
+    ['manual_exchange_order', 'manual_exchange_order_edit', 'counter_order_signal'].includes(entry.category) &&
+    entry.live === true && ['exchange_accepted', 'submitted', 'pending'].includes(entry.result)
+  );
+  const unique = new Map();
+  for (const entry of tracked) {
+    const pair = String(entry.pair).toLowerCase();
+    const id = String(entry.orderId);
+    unique.set(pair + '|' + id, { pair, id });
+  }
+  let checked = 0;
+  let completed = 0;
+  logOrderConsole('info', '開始以原訂單 ID 同步交易所狀態', { reason, orderCount: unique.size });
+  for (const { pair, id } of unique.values()) {
+    const key = pair + '|' + id;
+    if (reconcilingOrders.has(key)) continue;
+    reconcilingOrders.add(key);
+    try {
+      const response = await axios.get(
+        'https://api.bitopro.com/v3/orders/' + pair + '/' + encodeURIComponent(id),
+        { headers: authHeaders(), timeout: 12000 }
+      );
+      const order = response.data?.data ?? response.data;
+      checked++;
+      const originalAmount = Number(order?.originalAmount);
+      const executedAmount = Number(order?.executedAmount);
+      const statusCode = Number(order?.status);
+      // 僅接受交易所明確回報的完整成交；部分成交/撤單/未知狀態只同步觀察，不觸發反向單。
+      if (originalAmount > 0 && executedAmount === originalAmount && statusCode === 2) {
+        completed++;
+        await handleCompletedOrder(pair, {
+          ...order,
+          id: order.id || order.orderID || order.orderId || id
+        }, 'reconnect_order_reconciliation');
+      }
+      logOrderConsole('info', '原訂單狀態同步完成', {
+        pair, orderId: id, exchangeStatus: order?.status ?? null,
+        originalAmount, executedAmount,
+        fullFilled: originalAmount > 0 && executedAmount === originalAmount && statusCode === 2
+      });
+    } catch (err) {
+      logOrderConsole('warn', '原訂單狀態同步失敗，保留原本本機紀錄等待下次重連', {
+        pair, orderId: id, error: apiErrorMessage(err)
+      });
+    } finally {
+      reconcilingOrders.delete(key);
+    }
+  }
+  emit('info', { message: '重新連線訂單同步完成：查詢 ' + checked + ' 筆，確認完整成交 ' + completed + ' 筆；原訂單 ID 與參數均未重建。' });
+  return { checked, completed };
+}
+
 function processHistoryMessage(raw) {
   const rawText = raw.toString();
   let msg;
@@ -829,33 +887,12 @@ function processHistoryMessage(raw) {
   });
   if (firstLoad) {
     firstLoad = false;
-    const completedOrders = [];
-    for (const pair of PAIRS) {
-      const orders = data && typeof data === 'object' ? data[pair] : null;
-      if (!Array.isArray(orders)) continue;
-      for (const item of orders) {
-        const originalAmount = Number(item.originalAmount);
-        const executedAmount = Number(item.executedAmount);
-        const orderStatus = Number(item.status);
-        if (originalAmount > 0 && originalAmount === executedAmount && orderStatus === 2) {
-          completedOrders.push({
-            pair,
-            orderId: item.id || item.orderID || item.orderId || item.order_id || null,
-            action: String(item.action || '').toUpperCase(),
-            price: Number(item.price),
-            amount: executedAmount,
-            status: orderStatus
-          });
-        }
-      }
-    }
-    emit('info', { message: '已收到首次訂單歷史快照；本次僅盤點、不觸發反向委託。完整成交 ' + completedOrders.length + ' 筆。' });
-    logOrderConsole('warn', '首次訂單歷史快照僅盤點、不觸發反向委託', {
-      dataKeys: dataKeys.slice(0, 30),
-      pairArrayCounts: pairSummary,
-      completedOrderCount: completedOrders.length,
-      completedOrders: completedOrders.slice(0, 100)
+    logOrderConsole('info', '已收到訂單歷史首次快照；開始依本機保存的原訂單 ID 對接交易所狀態', {
+      dataKeys: dataKeys.slice(0, 30), pairArrayCounts: pairSummary
     });
+    reconcileExistingOrders('history_websocket_first_snapshot').catch(err =>
+      logOrderConsole('error', '重新連線後訂單狀態同步發生錯誤', { error: err.message })
+    );
     return;
   }
   if (!data || typeof data !== 'object') {
@@ -1628,7 +1665,7 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     backfillTradeHistory().catch(err =>
       emit('warning', { message: `服務啟動時歷史成交回補失敗：${apiErrorMessage(err)}` })
     );
-    if (credentialsReady()) connectUserTradeSocket();
+    if (credentialsReady()) { connectUserTradeSocket(); connectHistorySocket(); }
     else setStatus('needs_config', '請先設定 .env 的 API 認證資料');
   }, 1200);
 });
