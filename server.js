@@ -141,12 +141,6 @@ async function calibrateApiTime() {
     }
     apiTimeOffsetMs = measuredOffset;
     apiTimeCalibrationAt = new Date().toISOString();
-    logSystemConsole('info', 'BitoPro API 時間校正完成', {
-      offsetMs: apiTimeOffsetMs,
-      offsetSeconds: Number((apiTimeOffsetMs / 1000).toFixed(3)),
-      roundTripMs: finishedAt - startedAt,
-      calibratedAt: apiTimeCalibrationAt
-    });
     return { ok: true, offsetMs: apiTimeOffsetMs, calibratedAt: apiTimeCalibrationAt };
   } catch (err) {
     logSystemConsole('warn', 'BitoPro API 時間校正失敗，暫時使用本機時間', {
@@ -210,6 +204,14 @@ function logSystemConsole(level, label, details = {}) {
   if (level === 'error') console.error(line, output);
   else if (level === 'warn') console.warn(line, output);
   else console.log(line, output);
+}
+function logBitoConnection(level, message, details = {}) {
+  logSystemConsole(level, message, details);
+  emit(level === 'error' ? 'error' : level === 'warn' ? 'warning' : 'info', {
+    message,
+    source: 'bitopro_connection',
+    ...details
+  });
 }
 function addJournal(entry) {
   journal.unshift({ id: crypto.randomUUID(), time: new Date().toISOString(), ...entry });
@@ -1018,8 +1020,15 @@ function connectUserTradeSocket() {
   try {
     tradeWs = new WebSocket('wss://stream.bitopro.com:443/ws/v1/pub/auth/user-trades', { headers: authHeaders() });
     tradeWs.on('open', () => {
+      logBitoConnection('info', 'User Trade Stream 已連線', { url: 'wss://stream.bitopro.com:443/ws/v1/pub/auth/user-trades' });
       logOrderConsole('info', 'User Trade Stream 已建立連線', { url: 'wss://stream.bitopro.com:443/ws/v1/pub/auth/user-trades' });
-      emit('info', { message: 'User Trade Stream 已連線；BITO/TWD 只會在新成交時抓取。' });
+    });
+    tradeWs.on('unexpected-response', (request, response) => {
+      logBitoConnection('error', 'User Trade Stream 握手遭拒絕', {
+        httpStatus: response.statusCode || null,
+        statusMessage: response.statusMessage || null
+      });
+      response.resume();
     });
     tradeWs.on('message', raw => {
       const rawText = raw.toString();
@@ -1051,9 +1060,16 @@ function connectUserTradeSocket() {
         })
       );
     });
-    tradeWs.on('error', err => emit('warning', { message: `User Trade Stream 錯誤：${err.message}` }));
-    tradeWs.on('close', () => {
+    tradeWs.on('error', err => logBitoConnection('error', `User Trade Stream 連線錯誤：${err.message}`, {
+      code: err.code || null
+    }));
+    tradeWs.on('close', (code, reason) => {
       tradeWs = null;
+      logBitoConnection('warn', 'User Trade Stream 已斷線', {
+        closeCode: code,
+        reason: reason?.toString() || '',
+        reconnectInMs: running ? 5000 : null
+      });
       if (running) tradeReconnectTimer = setTimeout(connectUserTradeSocket, 5000);
     });
   } catch (err) {
@@ -1072,6 +1088,7 @@ function connectHistorySocket() {
   try {
     ws = new WebSocket('wss://stream.bitopro.com:443/ws/v1/pub/auth/orders/histories', { headers: authHeaders() });
     ws.on('open', () => {
+      logBitoConnection('info', 'BitoPro 訂單歷史 WebSocket 已連線', { url: 'wss://stream.bitopro.com:443/ws/v1/pub/auth/orders/histories' });
       logOrderConsole('info', '訂單歷史 WebSocket 已建立連線', { url: 'wss://stream.bitopro.com:443/ws/v1/pub/auth/orders/histories', liveTrading: LIVE_TRADING, pairs: PAIRS });
       setStatus('connected', 'Histories WebSocket 已連線');
       getAccountBalance().catch(err => {
@@ -1079,16 +1096,34 @@ function connectHistorySocket() {
       });
     });
     ws.on('message', processHistoryMessage);
+    ws.on('unexpected-response', (request, response) => {
+      logBitoConnection('error', 'BitoPro 訂單歷史 WebSocket 握手遭拒絕', {
+        httpStatus: response.statusCode || null,
+        statusMessage: response.statusMessage || null
+      });
+      response.resume();
+    });
     ws.on('error', err => {
+      logBitoConnection('error', `BitoPro 訂單歷史 WebSocket 連線錯誤：${err.message}`, {
+        code: err.code || null
+      });
       setStatus('error', 'WebSocket 錯誤', err.message);
     });
-    ws.on('close', () => {
+    ws.on('close', (code, reason) => {
       ws = null;
       if (!running) return;
+      logBitoConnection('warn', 'BitoPro 訂單歷史 WebSocket 已斷線，5 秒後重試', {
+        closeCode: code,
+        reason: reason?.toString() || '',
+        reconnectInMs: 5000
+      });
       setStatus('reconnecting', '連線已關閉，5 秒後重試');
       reconnectTimer = setTimeout(connectHistorySocket, 5000);
     });
   } catch (err) {
+    logBitoConnection('error', `無法建立 BitoPro 訂單歷史 WebSocket：${err.message}`, {
+      code: err.code || null
+    });
     setStatus('error', '無法建立 WebSocket', err.message);
   }
 }
@@ -1580,8 +1615,8 @@ app.get('/api/export.csv', (req, res) => {
   res.setHeader('Content-Disposition', 'attachment; filename="bito-daily-stats.csv"');
   res.send('\ufeff' + rows.join('\r\n'));
 });
-const server = app.listen(PORT, '127.0.0.1', () => {
-  console.log(`Dashboard: http://127.0.0.1:${PORT}`);
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Dashboard: http://0.0.0.0:${PORT}`);
   // 成交紀錄與策略下單分離：服務啟動後自動補登歷史成交並連線成交事件，
   // 不再要求使用者按「啟動監控」，也不會因此自動啟動反向策略下單。
   running = true;
