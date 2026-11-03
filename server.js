@@ -1059,6 +1059,7 @@ function connectUserTradeSocket() {
     tradeWs.on('open', () => {
       logBitoConnection('info', 'User Trade Stream 已連線', { url: 'wss://stream.bitopro.com:443/ws/v1/pub/auth/user-trades' });
       logOrderConsole('info', 'User Trade Stream 已建立連線', { url: 'wss://stream.bitopro.com:443/ws/v1/pub/auth/user-trades' });
+      reconcileExistingOrders('user_trade_websocket_connected').catch(err => logOrderConsole('error', 'User Trade 重新連線後同步訂單失敗', { error: err.message }));
     });
     tradeWs.on('unexpected-response', (request, response) => {
       logBitoConnection('error', 'User Trade Stream 握手遭拒絕', {
@@ -1122,6 +1123,7 @@ function connectHistorySocket() {
     return;
   }
   firstLoad = true;
+  setStatus('reconnecting', '正在嘗試連接訂單歷史，連線成功後同步原訂單狀態');
   try {
     ws = new WebSocket('wss://stream.bitopro.com:443/ws/v1/pub/auth/orders/histories', { headers: authHeaders() });
     ws.on('open', () => {
