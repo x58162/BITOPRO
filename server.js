@@ -837,6 +837,20 @@ async function reconcileExistingOrders(reason = 'websocket_reconnected') {
       const originalAmount = Number(order?.originalAmount);
       const executedAmount = Number(order?.executedAmount);
       const statusCode = Number(order?.status);
+      // 將交易所狀態附加回原本的本機訂單紀錄，不另建訂單、不更換原訂單 ID。
+      const localRecord = [...journal].reverse().find(entry =>
+        String(entry.orderId || '') === id &&
+        String(entry.pair || '').toLowerCase() === pair &&
+        ['manual_exchange_order', 'manual_exchange_order_edit', 'counter_order_signal'].includes(entry.category)
+      );
+      if (localRecord) {
+        localRecord.exchangeStatus = order?.status ?? null;
+        localRecord.exchangeOriginalAmount = Number.isFinite(originalAmount) ? originalAmount : null;
+        localRecord.exchangeExecutedAmount = Number.isFinite(executedAmount) ? executedAmount : null;
+        localRecord.lastStatusSyncAt = new Date().toISOString();
+        persist();
+        emit('journal', { entry: localRecord });
+      }
       // 僅接受交易所明確回報的完整成交；部分成交/撤單/未知狀態只同步觀察，不觸發反向單。
       if (originalAmount > 0 && executedAmount === originalAmount && statusCode === 2) {
         completed++;
