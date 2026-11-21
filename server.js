@@ -988,14 +988,21 @@ async function handleCompletedOrder(pair, item, source = 'unknown') {
     originalSpread: configuredSpread,
     gridContextSource: 'standalone_sell_fill'
   } : null));
-  if (seenFills.has(dedupeKey) || journal.some(entry =>
+  // 僅在反向單已被交易所接受、模擬預覽或結果不明時阻擋重複觸發。
+  // 明確失敗的紀錄允許下一次相同完整成交事件重新嘗試，避免一次暫時性錯誤永久鎖死格線。
+  const previousCounterSignal = [...journal].reverse().find(entry =>
     entry.category === 'counter_order_signal' && entry.sourceOrderKey === dedupeKey
-  )) {
-    logOrderConsole('warn', '完整成交已偵測但略過反向委託：防重複', { pair, sourceOrderId, action, source, status: 'SKIPPED_DUPLICATE' });
+  );
+  const previousResult = String(previousCounterSignal?.result || '').toLowerCase();
+  const previousAttemptBlocksRetry = previousCounterSignal &&
+    ['exchange_accepted', 'pending', 'dry_run', 'unknown'].includes(previousResult);
+  if (seenFills.has(dedupeKey) || previousAttemptBlocksRetry) {
+    logOrderConsole('warn', '完整成交已偵測但略過反向委託：防重複', {
+      pair, sourceOrderId, action, source, previousResult: previousResult || null,
+      status: 'SKIPPED_DUPLICATE'
+    });
     return;
   }
-  seenFills.add(dedupeKey);
-  if (seenFills.size > 20000) seenFills.clear();
   logOrderConsole('info', '偵測到完整成交，準備建立反向委託', {
     source, pair, sourceOrderId, sourceAction: action,
     counterAction: action === 'SELL' ? 'BUY' : 'SELL',
@@ -1008,6 +1015,10 @@ async function handleCompletedOrder(pair, item, source = 'unknown') {
       addJournal({ category: 'grid_cycle_warning', pair, sourceOrderId, sourceOrderKey: dedupeKey, result: 'invalid_grid_context', message: '無法依目前價差設定建立有效的下一格價格。' });
       return;
     }
+    // 僅在格線上下文確認有效後才加入記憶體去重集合，避免無效價差造成永久鎖單。
+    seenFills.add(dedupeKey);
+    if (seenFills.size > 20000) seenFills.clear();
+
     if (gridContext.gridContextSource === 'standalone_sell_fill') {
       logOrderConsole('info', '獨立 SELL 成交已建立新格線，準備自動回補 BUY', {
         pair, sourceOrderId, fillPrice: price, nextBuyPrice: gridContext.originalBuyPrice,
@@ -1018,8 +1029,19 @@ async function handleCompletedOrder(pair, item, source = 'unknown') {
     await placeCounterOrder({
       pair, price, action, originalAmount: executedAmount, executedAmount,
       sourceOrderId, sourceOrderKey: dedupeKey,
-      ...(gridContext || {})
+      ...gridContext
     });
+    // 交易所明確拒絕／設定錯誤等可確認失敗，不應永久佔用去重鎖；
+    // timeout/連線中斷的 unknown 則保留鎖，必須先人工核對交易所，避免重複下單。
+    const latestCounterSignal = [...journal].reverse().find(entry =>
+      entry.category === 'counter_order_signal' && entry.sourceOrderKey === dedupeKey
+    );
+    if (['error', 'failed'].includes(String(latestCounterSignal?.result || '').toLowerCase())) {
+      seenFills.delete(dedupeKey);
+      logOrderConsole('warn', '反向委託為明確失敗，已解除本機去重鎖；等待下一次成交同步事件重試', {
+        pair, sourceOrderId, result: latestCounterSignal.result
+      });
+    }
   } catch (err) {
     if (!journal.some(entry => entry.category === 'counter_order_signal' && entry.sourceOrderKey === dedupeKey)) {
       seenFills.delete(dedupeKey);
