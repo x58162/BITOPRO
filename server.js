@@ -724,8 +724,15 @@ async function placeCounterOrder(fill) {
   let lastError = null;
   let lastMakerQuote = null;
   let lastAttempt = 0;
-  if (sourceOrderKey && journal.some(entry => entry.category === 'counter_order_signal' && entry.sourceOrderKey === sourceOrderKey)) {
-    logOrderConsole('warn', '反向委託略過：來源訂單已有紀錄（防止重複送單）', { pair: fill.pair, sourceOrderId: fill.sourceOrderId || sourceOrderKey, status: 'SKIPPED_DUPLICATE' });
+  const previousSignal = sourceOrderKey ? [...journal].reverse().find(entry =>
+    entry.category === 'counter_order_signal' && entry.sourceOrderKey === sourceOrderKey
+  ) : null;
+  const previousResult = String(previousSignal?.result || '').toLowerCase();
+  if (previousSignal && ['exchange_accepted', 'submitted', 'pending', 'dry_run', 'unknown'].includes(previousResult)) {
+    logOrderConsole('warn', '反向委託略過：來源訂單已有有效或待核對紀錄（防止重複送單）', {
+      pair: fill.pair, sourceOrderId: fill.sourceOrderId || sourceOrderKey,
+      previousResult, status: 'SKIPPED_DUPLICATE'
+    });
     emit('warning', { message: '原始訂單 ' + (fill.sourceOrderId || sourceOrderKey) + ' 已有反向委託紀錄，略過重複觸發。' });
     return;
   }
@@ -1036,10 +1043,12 @@ async function handleCompletedOrder(pair, item, source = 'unknown') {
     const latestCounterSignal = [...journal].reverse().find(entry =>
       entry.category === 'counter_order_signal' && entry.sourceOrderKey === dedupeKey
     );
-    if (['error', 'failed'].includes(String(latestCounterSignal?.result || '').toLowerCase())) {
+    if (!latestCounterSignal || ['error', 'failed'].includes(String(latestCounterSignal.result || '').toLowerCase())) {
       seenFills.delete(dedupeKey);
-      logOrderConsole('warn', '反向委託為明確失敗，已解除本機去重鎖；等待下一次成交同步事件重試', {
-        pair, sourceOrderId, result: latestCounterSignal.result
+      logOrderConsole('warn', latestCounterSignal
+        ? '反向委託為明確失敗，已解除本機去重鎖；等待下一次成交同步事件重試'
+        : '反向委託未建立任何送單紀錄，已解除本機去重鎖；可於修正設定後重新同步', {
+        pair, sourceOrderId, result: latestCounterSignal?.result || 'no_signal_record'
       });
     }
   } catch (err) {
