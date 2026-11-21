@@ -12,7 +12,7 @@ const localSecurity = require('./security/http');
 app.use('/api/security', localSecurity.router);
 app.use(localSecurity.apiGate);
 app.use(express.static(path.join(__dirname, 'public')));
-
+axios.defaults.headers.common['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36'
 const PORT = Number(process.env.PORT || 3001);
 const API_KEY = process.env.BITOPRO_API_KEY || '';
 const API_SECRET = process.env.BITOPRO_API_SECRET || '';
@@ -158,7 +158,8 @@ function signedHeaders(payload) {
   return {
     'X-BITOPRO-APIKEY': API_KEY,
     'X-BITOPRO-PAYLOAD': encoded,
-    'X-BITOPRO-SIGNATURE': signature
+    'X-BITOPRO-SIGNATURE': signature,
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36'
   };
 }
 function authHeaders() {
@@ -174,7 +175,8 @@ function signedOrderHeaders(payload, urlSafe = false) {
   return {
     'X-BITOPRO-APIKEY': API_KEY,
     'X-BITOPRO-PAYLOAD': encoded,
-    'X-BITOPRO-SIGNATURE': signature
+    'X-BITOPRO-SIGNATURE': signature,
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36'
   };
 }
 function requireCredentials(res) {
