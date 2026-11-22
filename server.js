@@ -1,0 +1,1730 @@
+require('dotenv').config();
+const express = require('express');
+const axios = require('axios');
+const crypto = require('crypto');
+const WebSocket = require('ws');
+const fs = require('fs');
+const path = require('path');
+
+const app = express();
+app.use(express.json());
+const localSecurity = require('./security/http');
+app.use('/api/security', localSecurity.router);
+app.use(localSecurity.apiGate);
+app.use(express.static(path.join(__dirname, 'public')));
+axios.defaults.headers.common['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36'
+const PORT = Number(process.env.PORT || 3001);
+const API_KEY = process.env.BITOPRO_API_KEY || '';
+const API_SECRET = process.env.BITOPRO_API_SECRET || '';
+const EMAIL = process.env.BITOPRO_EMAIL || '';
+const LIVE_TRADING = String(process.env.LIVE_TRADING || 'false').toLowerCase() === 'true'; // 由 .env 控制自動策略是否送出實盤委託。
+const FEE_RATE = Math.max(0, Number(process.env.FEE_RATE || 0.0001));
+const DATA_DIR = path.join(__dirname, 'data');
+const JOURNAL = path.join(DATA_DIR, 'journal.json');
+const EVENTS_FILE = path.join(DATA_DIR, 'events.json');
+const EVENT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const DAILY_STATS_FILE = path.join(DATA_DIR, 'daily-stats.json');
+const SPREADS_FILE = path.join(DATA_DIR, 'spreads.json');
+const PAIRS_FILE = path.join(DATA_DIR, 'pairs.json');
+const BITO_PRICE_HISTORY_FILE = path.join(DATA_DIR, 'bito_twd_price_history.json');
+fs.mkdirSync(DATA_DIR, { recursive: true });
+
+const DEFAULT_SPREADS = {
+  sol_twd: 100,
+  usdt_twd: 0.020,
+  btc_twd: 20000,
+  eth_twd: 2000,
+  ltc_twd: 100,
+  bnb_twd: 2000,
+  bito_twd: 0.1,
+  btc_usdt: 600
+};
+const DEFAULT_PAIRS = Object.keys(DEFAULT_SPREADS);
+function validPair(pair) { return /^[a-z0-9]{2,20}_[a-z0-9]{2,20}$/.test(String(pair || '')); }
+function loadPairs() {
+  try {
+    const saved = JSON.parse(fs.readFileSync(PAIRS_FILE, 'utf8'));
+    if (Array.isArray(saved)) { const valid = [...new Set(saved.map(x => String(x).toLowerCase()).filter(validPair))]; if (valid.length) return valid; }
+  } catch {}
+  return [...DEFAULT_PAIRS];
+}
+let PAIRS = loadPairs();
+function savePairs() { fs.writeFileSync(PAIRS_FILE, JSON.stringify(PAIRS, null, 2), 'utf8'); }
+function loadSpreads() {
+  try { const saved = JSON.parse(fs.readFileSync(SPREADS_FILE, 'utf8')); return Object.fromEntries(PAIRS.map(pair => [pair, Number.isFinite(Number(saved[pair])) && Number(saved[pair]) >= 0 ? Number(saved[pair]) : (DEFAULT_SPREADS[pair] ?? 0)])); }
+  catch { return Object.fromEntries(PAIRS.map(pair => [pair, DEFAULT_SPREADS[pair] ?? 0])); }
+}
+let SPREADS = loadSpreads();
+function saveSpreads() { fs.writeFileSync(SPREADS_FILE, JSON.stringify(SPREADS, null, 2), 'utf8'); }
+
+let ws = null;
+let reconnectTimer = null;
+let running = false;
+let firstLoad = true;
+let status = { state: 'stopped', message: '尚未啟動', since: null, lastError: null };
+let balances = [];
+let assetValuation = { totalTwd: null, pricedCurrencies: [], unpricedCurrencies: [], updatedAt: null };
+let clients = new Set();
+function loadEvents() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(EVENTS_FILE, 'utf8'));
+    return Array.isArray(parsed) ? parsed.filter(item => item && item.time && Date.parse(item.time) >= Date.now() - EVENT_RETENTION_MS) : [];
+  } catch { return []; }
+}
+let events = loadEvents();
+function persistEvents() {
+  const cutoff = Date.now() - EVENT_RETENTION_MS;
+  events = events.filter(item => item && Date.parse(item.time) >= cutoff);
+  fs.writeFileSync(EVENTS_FILE, JSON.stringify(events, null, 2), 'utf8');
+}
+try { persistEvents(); } catch (err) { console.error('清理過期即時事件失敗：', err.message); }
+let orderBusy = false;
+let bitoTwdPrice = null;
+let bitoTwdPriceAt = null;
+let bitoPriceHistory = [];
+try { bitoPriceHistory = JSON.parse(fs.readFileSync(BITO_PRICE_HISTORY_FILE, 'utf8')); if (!Array.isArray(bitoPriceHistory)) bitoPriceHistory = []; } catch { bitoPriceHistory = []; }
+
+function loadJournal() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(JOURNAL, 'utf8'));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch { return []; }
+}
+let journal = loadJournal();
+function persist() {
+  fs.writeFileSync(JOURNAL, JSON.stringify(journal.slice(-10000), null, 2), 'utf8');
+}
+function emit(type, data = {}) {
+  const item = { id: Date.now() + Math.random(), time: new Date().toISOString(), type, ...data };
+  events.unshift(item);
+  try { persistEvents(); } catch (err) { console.error('保存即時事件失敗：', err.message); }
+  for (const client of clients) {
+    if (client.readyState === 1) client.send(JSON.stringify({ kind: 'event', item }));
+  }
+}
+function setStatus(state, message, error = null) {
+  status = { ...status, state, message, lastError: error, since: state === 'connected' ? new Date().toISOString() : status.since };
+  emit('status', { state, message, error });
+}
+function credentialsReady() { return !!(API_KEY && API_SECRET && EMAIL); }
+
+// API 專用時間校正：使用 BitoPro 公開 API 回應的 HTTP Date 標頭估算時差。
+// 不修改 Windows 系統時間，也不改動本機日誌/成交紀錄使用的時間。
+let apiTimeOffsetMs = 0;
+let apiTimeCalibrationAt = null;
+let apiTimeCalibrationInProgress = false;
+let lastApiTimestamp = 0;
+function apiTimestamp() {
+  const candidate = Date.now() + apiTimeOffsetMs;
+  lastApiTimestamp = Math.max(candidate, lastApiTimestamp + 1);
+  return lastApiTimestamp;
+}
+async function calibrateApiTime() {
+  if (apiTimeCalibrationInProgress) return { ok: false, skipped: true };
+  apiTimeCalibrationInProgress = true;
+  const startedAt = Date.now();
+  try {
+    const response = await axios.get('https://api.bitopro.com/v3/tickers/bito_twd', { timeout: 8000 });
+    const finishedAt = Date.now();
+    const serverDate = Date.parse(response.headers?.date || '');
+    if (!Number.isFinite(serverDate)) {
+      logSystemConsole('warn', 'BitoPro 時間校正未完成：回應沒有有效的 Date 標頭');
+      return { ok: false, error: 'missing_date_header' };
+    }
+    // 以請求往返的中點估算發出請求時的本機時間，降低網路延遲造成的偏差。
+    const midpoint = startedAt + (finishedAt - startedAt) / 2;
+    const measuredOffset = Math.round(serverDate - midpoint);
+    // 只接受合理範圍內的伺服器時間，避免錯誤標頭導致所有 API timestamp 大幅偏移。
+    if (Math.abs(measuredOffset) > 24 * 60 * 60 * 1000) {
+      logSystemConsole('warn', 'BitoPro 時間校正結果超出 24 小時，保留原本時間偏移', { measuredOffsetMs: measuredOffset });
+      return { ok: false, error: 'offset_out_of_range', measuredOffsetMs: measuredOffset };
+    }
+    apiTimeOffsetMs = measuredOffset;
+    apiTimeCalibrationAt = new Date().toISOString();
+    return { ok: true, offsetMs: apiTimeOffsetMs, calibratedAt: apiTimeCalibrationAt };
+  } catch (err) {
+    logSystemConsole('warn', 'BitoPro API 時間校正失敗，暫時使用本機時間', {
+      error: apiErrorMessage(err),
+      httpStatus: err.response?.status || null
+    });
+    return { ok: false, error: apiErrorMessage(err) };
+  } finally {
+    apiTimeCalibrationInProgress = false;
+  }
+}
+function signedHeaders(payload) {
+  const encoded = Buffer.from(JSON.stringify(payload)).toString('base64');
+  const signature = crypto.createHmac('sha384', API_SECRET).update(encoded).digest('hex');
+  return {
+    'X-BITOPRO-APIKEY': API_KEY,
+    'X-BITOPRO-PAYLOAD': encoded,
+    'X-BITOPRO-SIGNATURE': signature,
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36'
+  };
+}
+function authHeaders() {
+  const payload = { identity: EMAIL, nonce: apiTimestamp() };
+  return signedHeaders(payload);
+}
+function signedOrderHeaders(payload, urlSafe = false) {
+  const json = JSON.stringify(payload);
+  const encoded = urlSafe
+    ? Buffer.from(json).toString('base64').replace(/\+/g, '-').replace(/\//g, '_')
+    : Buffer.from(json).toString('base64');
+  const signature = crypto.createHmac('sha384', API_SECRET).update(encoded).digest('hex');
+  return {
+    'X-BITOPRO-APIKEY': API_KEY,
+    'X-BITOPRO-PAYLOAD': encoded,
+    'X-BITOPRO-SIGNATURE': signature,
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36'
+  };
+}
+function requireCredentials(res) {
+  if (!credentialsReady()) {
+    res.status(503).json({ ok: false, error: '請先在 .env 設定 BITOPRO_API_KEY、BITOPRO_API_SECRET、BITOPRO_EMAIL，並重新啟動服務。' });
+    return false;
+  }
+  return true;
+}
+function apiErrorMessage(err) {
+  const data = err.response?.data;
+  return typeof data === 'string' ? data : JSON.stringify(data || { message: err.message });
+}
+
+function logOrderConsole(level, label, details = {}) {
+  const timestamp = new Date().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei', hour12: false });
+  const line = `[${timestamp}] [訂單] ${label}`;
+  const output = { ...details };
+  if (level === 'error') console.error(line, output);
+  else if (level === 'warn') console.warn(line, output);
+  else console.log(line, output);
+}
+function logSystemConsole(level, label, details = {}) {
+  const timestamp = new Date().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei', hour12: false });
+  const line = `[${timestamp}] [系統] ${label}`;
+  const output = { ...details };
+  if (level === 'error') console.error(line, output);
+  else if (level === 'warn') console.warn(line, output);
+  else console.log(line, output);
+}
+function logBitoConnection(level, message, details = {}) {
+  logSystemConsole(level, message, details);
+  emit(level === 'error' ? 'error' : level === 'warn' ? 'warning' : 'info', {
+    message,
+    source: 'bitopro_connection',
+    ...details
+  });
+}
+function addJournal(entry) {
+  journal.unshift({ id: crypto.randomUUID(), time: new Date().toISOString(), ...entry });
+  journal = journal.slice(0, 10000);
+  persist();
+  emit('journal', { entry: journal[0] });
+}
+function pairBase(pair) { return pair.split('_')[0].toUpperCase(); }
+
+async function getTickerPrice(pair) {
+  try {
+    const response = await axios.get(`https://api.bitopro.com/v3/tickers/${pair}`, { timeout: 8000 });
+    const root = response.data?.data;
+    const rows = Array.isArray(root) ? root : (root ? [root] : []);
+    for (const row of rows) {
+      const value = Number(row.lastPrice ?? row.last_price ?? row.price ?? row.close ?? row.last);
+      if (Number.isFinite(value) && value > 0) return value;
+    }
+  } catch {}
+  return null;
+}
+
+// Historical BITO/TWD minute-candle cache. BitoPro's public 1m OHLC endpoint
+// is the historical source; unlike the live ticker, it is queried around each
+// trade's own exchange timestamp. The candle close is a minute-level proxy,
+// not an exact second-by-second execution quote.
+const historicalBitoMinuteCache = new Map();
+async function fetchHistoricalBitoPriceAt(timestamp) {
+  const iso = toIsoTimestamp(timestamp);
+  const targetMs = Date.parse(iso || '');
+  if (!Number.isFinite(targetMs)) return null;
+  const minuteKey = Math.floor(targetMs / 60000);
+  if (historicalBitoMinuteCache.has(minuteKey)) return historicalBitoMinuteCache.get(minuteKey);
+  const from = Math.floor((targetMs - 120000) / 1000);
+  const to = Math.ceil((targetMs + 120000) / 1000);
+  let result = null;
+  try {
+    const response = await axios.get('https://api.bitopro.com/v3/trading-history/bito_twd', {
+      params: { resolution: '1m', from, to }, timeout: 12000
+    });
+    const root = response.data?.data ?? response.data;
+    const rows = Array.isArray(root) ? root : (Array.isArray(root?.data) ? root.data : []);
+    let best = null;
+    let bestDistance = Infinity;
+    for (const row of rows) {
+      const rawStamp = Number(row.timestamp);
+      const candleMs = rawStamp < 1e12 ? rawStamp * 1000 : rawStamp;
+      const close = Number(row.close);
+      if (!Number.isFinite(candleMs) || !(close > 0)) continue;
+      // Prefer the candle containing the fill timestamp; otherwise use the
+      // closest candle start, only if it is within two minutes.
+      const contains = targetMs >= candleMs && targetMs < candleMs + 60000;
+      const distance = contains ? 0 : Math.abs(candleMs - targetMs);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = { time: new Date(candleMs).toISOString(), price: close, source: 'bito_twd_1m_ohlc_close', candleTimestamp: candleMs };
+      }
+    }
+    if (best && bestDistance <= 120000) result = best;
+  } catch (err) {
+    emit('warning', { message: `查詢成交時間附近 BITO/TWD 歷史行情失敗：${apiErrorMessage(err)}` });
+  }
+  historicalBitoMinuteCache.set(minuteKey, result);
+  return result;
+}
+// BITO/TWD 價格只在即時成交事件發生時抓取；不再定時輪詢。
+async function fetchBitoPriceForFill() {
+  const price = await getTickerPrice('bito_twd');
+  if (!(Number.isFinite(price) && price > 0)) return null;
+  const sample = { time: new Date().toISOString(), price };
+  bitoTwdPrice = price;
+  bitoTwdPriceAt = sample.time;
+  bitoPriceHistory.push(sample);
+  const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+  bitoPriceHistory = bitoPriceHistory.filter(x => Date.parse(x.time) >= cutoff).slice(-600000);
+  try { fs.writeFileSync(BITO_PRICE_HISTORY_FILE, JSON.stringify(bitoPriceHistory), 'utf8'); }
+  catch (err) { emit('warning', { message: `儲存 BITO/TWD 歷史行情失敗：${err.message}` }); }
+  return sample;
+}
+function getBitoPriceNear(timeIso) {
+  const target = Date.parse(timeIso || new Date().toISOString());
+  if (!Number.isFinite(target)) return null;
+  let best = null;
+  let bestDiff = Infinity;
+  for (const sample of bitoPriceHistory) {
+    const ts = Date.parse(sample.time);
+    if (!Number.isFinite(ts)) continue;
+    const diff = Math.abs(ts - target);
+    if (diff < bestDiff) { best = sample; bestDiff = diff; }
+  }
+  // Only associate a sampled price with a fill if it is within 15 seconds.
+  return best && bestDiff <= 15000 ? { ...best, differenceMs: bestDiff } : null;
+}
+function feeFields(item, receivedAt, priceSample = null) {
+  const fee = Number(item.fee || 0);
+  const feeCurrency = String(item.feeCurrency || item.fee_currency || item.feeSymbol || item.fee_symbol || item.feeCurrencyName || item.fee_currency_name || (fee > 0 ? 'BITO' : '')).toUpperCase();
+  if (!(fee > 0) || feeCurrency !== 'BITO') return { fee, feeCurrency: feeCurrency || null, feeTwdCost: null, feeBitoTwdPrice: null, feePriceTime: null, feePriceStatus: fee > 0 ? 'unsupported_fee_currency' : 'no_fee_reported' };
+  if (!priceSample) return { fee, feeCurrency, feeTwdCost: null, feeBitoTwdPrice: null, feePriceTime: null, feePriceStatus: 'historical_price_not_sampled' };
+  return { fee, feeCurrency, feeTwdCost: fee * priceSample.price, feeBitoTwdPrice: priceSample.price, feePriceTime: priceSample.time, feePriceStatus: priceSample.source || 'fetched_on_fill' };
+}
+
+const seenTrades = new Set(journal.map(x => x.tradeId || x.matchID || x.dedupeKey).filter(Boolean).map(String));
+function normalizeTrade(raw, fallbackPair = '') {
+  const item = raw?.data && !Array.isArray(raw.data) ? raw.data : raw;
+  const base = String(item.base || '').toLowerCase();
+  const quote = String(item.quote || '').toLowerCase();
+  const pair = String(item.pair || fallbackPair || (base && quote ? `${base}_${quote}` : '')).toLowerCase();
+  const side = String(item.side || item.action || '').toLowerCase();
+  const action = ['ask', 'sell'].includes(side) ? 'SELL' : (['bid', 'buy'].includes(side) ? 'BUY' : String(item.action || '').toUpperCase());
+  const tradeId = String(item.matchID || item.matchId || item.match_id || item.tradeID || item.tradeId || item.trade_id || item.id || '');
+  const price = Number(item.price || item.matchPrice || item.match_price);
+  const amount = Number(item.baseAmount ?? item.base_amount ?? item.volume ?? item.amount ?? item.executedAmount ?? item.executed_amount);
+  if (!pair || !['BUY', 'SELL'].includes(action) || !(price > 0) || !(amount > 0)) return null;
+  return { item, pair, action, price, amount, tradeId, orderId: item.orderID || item.orderId || item.order_id || null };
+}
+async function recordUserTrade(raw, fallbackPair = '', isHistorical = false, fallbackPriceSample = null) {
+  const trade = normalizeTrade(raw, fallbackPair);
+  if (!trade) return false;
+  const item = trade.item;
+  const dedupeKey = trade.tradeId || `${trade.pair}|${trade.orderId || ''}|${trade.action}|${trade.price}|${trade.amount}|${item.transactionTimestamp || item.timestamp || ''}`;
+  if (seenTrades.has(dedupeKey)) return false;
+  seenTrades.add(dedupeKey);
+  if (seenTrades.size > 50000) {
+    // Journal IDs remain persisted; this in-memory set is bounded to avoid unbounded growth.
+    const recent = journal.slice(0, 20000).map(x => String(x.tradeId || x.dedupeKey || '')).filter(Boolean);
+    seenTrades.clear(); recent.forEach(x => seenTrades.add(x));
+  }
+  const receivedAt = new Date().toISOString();
+  // 每筆成交都以交易所回傳的實際成交時間查詢 BITO/TWD 歷史 1 分鐘 K 線；
+  // 不再把「程式收到事件時的即時價格」當成成交當時價格，也不共用其他成交的價格。
+  const exchangeTimestamp = item.transactionTimestamp || item.transaction_timestamp || item.timestamp || item.datetime || item.createdTimestamp || item.created_timestamp || null;
+  let priceSample = null;
+  try { priceSample = await fetchHistoricalBitoPriceAt(exchangeTimestamp); } catch {}
+  if (!priceSample && isHistorical) priceSample = getBitoPriceNear(toIsoTimestamp(exchangeTimestamp)) || fallbackPriceSample;
+  if (!priceSample && !isHistorical) {
+    // Keep missing as pending instead of attaching a current price to an older fill.
+    priceSample = null;
+  }
+  const feeItem = { ...item, fee: item.fee, feeCurrency: item.feeCurrency || item.feeSymbol };
+  const feeInfo = feeFields(feeItem, receivedAt, priceSample);
+  const entry = {
+    category: 'filled_trade', time: receivedAt, exchangeTime: exchangeTimestamp, pair: trade.pair,
+    action: trade.action, price: trade.price, amount: trade.amount, tradeId: trade.tradeId || dedupeKey,
+    orderId: trade.orderId, matchID: trade.tradeId || null, isMaker: item.isMaker ?? null,
+    orderType: item.orderType || item.type || 'LIMIT', historical: !!isHistorical,
+    ...feeInfo, result: 'filled'
+  };
+  addJournal(entry);
+
+  // 模式 A：USER_TRADE 只負責記錄每筆實際成交，不在這裡送反向單。
+  // 反向委託統一由訂單歷史事件處理，且必須等原始訂單 status=2 且全部成交，
+  // 避免部分成交時產生多張反向委託，以及 USER_TRADE／歷史事件重複觸發。
+  if (!isHistorical) {
+    // 實際新成交後才更新一次帳戶餘額；歷史回補不觸發，避免連續呼叫 API。
+    getAccountBalance().catch(err => emit('error', { message: `成交已記錄，但成交後更新帳戶資產失敗：${apiErrorMessage(err)}` }));
+  }
+  if (!isHistorical && feeInfo.feeCurrency === 'BITO' && feeInfo.feeTwdCost != null) {
+    emit('info', { message: `成交手續費：${feeInfo.fee} BITO × NT$${feeInfo.feeBitoTwdPrice} = NT$${feeInfo.feeTwdCost.toFixed(6)}` });
+  }
+  emit('fill', { message: `${isHistorical ? '補登歷史成交' : '即時成交'}：${trade.pair.toUpperCase()} ${trade.action} ${trade.amount} @ ${trade.price}` });
+  return true;
+}
+function toIsoTimestamp(value) {
+  if (value == null || value === '') return null;
+  if (typeof value === 'number' || /^\d+$/.test(String(value))) {
+    const n = Number(value);
+    const ms = n < 1e12 ? n * 1000 : n;
+    const d = new Date(ms);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  }
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+function taipeiDate(value) {
+  const iso = toIsoTimestamp(value);
+  if (!iso) return null;
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date(iso));
+  const p = Object.fromEntries(parts.map(x => [x.type, x.value]));
+  return `${p.year}-${p.month}-${p.day}`;
+}
+async function backfillTradeHistory() {
+  if (!credentialsReady()) {
+    emit('warning', { message: '歷史成交回補略過：尚未設定完整 BitoPro API 憑證' });
+    return;
+  }
+  const todayTaipei = taipeiDate(new Date());
+  // 只回補 2026-10-18（台灣時間）起的成交；更早的成交不再補查歷史 BITO/TWD 報價。
+  const endOfDay = Date.now();
+  const startOfDay = Date.parse('2026-10-17T16:00:00.000Z');
+  const historicalTrades = [];
+
+  // Use the official private trade-history endpoint, not order history. Trade history includes
+  // tradeId, orderId, baseAmount, quoteAmount and the actual fee for each fill.
+  for (const pair of PAIRS) {
+    let cursor = null;
+    const seenCursors = new Set();
+    try {
+      for (let page = 0; page < 10; page++) {
+        const params = { startTimestamp: startOfDay, endTimestamp: endOfDay, limit: 1000 };
+        if (cursor) params.tradeId = cursor;
+        const response = await axios.get(`https://api.bitopro.com/v3/orders/trades/${pair}`, {
+          headers: authHeaders(), params, timeout: 15000
+        });
+        const root = response.data?.data ?? response.data;
+        const rows = Array.isArray(root) ? root : (Array.isArray(root?.trades) ? root.trades : []);
+        if (!rows.length) break;
+        for (const row of rows) {
+          const stamp = row.transactionTimestamp || row.transaction_timestamp || row.timestamp || row.datetime || row.createdTimestamp || row.created_timestamp;
+          const stampMs = Date.parse(toIsoTimestamp(stamp) || '');
+          if (!Number.isFinite(stampMs) || stampMs < startOfDay || stampMs > endOfDay) continue;
+          const normalized = normalizeTrade(row, pair);
+          if (!normalized) continue;
+          historicalTrades.push({ row, pair, stamp, normalized });
+        }
+        if (rows.length < 1000) break;
+        const last = rows[rows.length - 1];
+        const nextCursor = String(last.tradeId || last.tradeID || last.id || '');
+        if (!nextCursor || seenCursors.has(nextCursor)) break;
+        seenCursors.add(nextCursor);
+        cursor = nextCursor;
+      }
+    } catch (err) {
+      emit('warning', { message: `回補 ${pair.toUpperCase()} 成交明細失敗：${apiErrorMessage(err)}` });
+    }
+  }
+
+  // 僅使用成交時間附近的歷史 BITO/TWD 報價。不得拿目前價格補歷史成交，否則多筆成交會錯用同一價格。
+
+  let count = 0;
+  for (const { row, pair, stamp, normalized } of historicalTrades) {
+    const tradeId = String(row.tradeId || row.tradeID || row.trade_id || row.matchID || row.matchId || row.id || '');
+    const orderId = String(row.orderId || row.orderID || row.order_id || normalized.orderId || '');
+    // 若 API 個別回傳未帶 tradeId，仍以交易所訂單、時間、方向、價格、數量組合識別，不直接丟棄。
+    const stableTradeKey = tradeId || `${orderId}|${stamp}|${normalized.action}|${normalized.price}|${normalized.amount}`;
+    const tradeStampMs = Date.parse(toIsoTimestamp(stamp) || '');
+    const duplicateIndex = journal.findIndex(x => {
+      if (x.category !== 'filled_trade' || String(x.pair || '').toLowerCase() !== pair.toLowerCase()) return false;
+      const existingTradeId = String(x.tradeId || x.matchID || x.dedupeKey || '');
+      const sameId = existingTradeId === stableTradeKey && String(x.orderId || '') === orderId;
+      if (sameId) return true;
+
+      // Live User Trade Stream and REST history can expose different ID fields for
+      // the same execution. Match the full execution fingerprint before inserting,
+      // so a history backfill enriches the live row instead of creating duplicates.
+      const sameOrder = orderId
+        ? String(x.orderId || '') === orderId
+        : !x.orderId;
+      const sameAction = String(x.action || '').toUpperCase() === normalized.action;
+      const samePrice = Math.abs(Number(x.price) - normalized.price) < 1e-10;
+      const sameAmount = Math.abs(Number(x.amount) - normalized.amount) < 1e-8;
+      const existingStampMs = Date.parse(toIsoTimestamp(x.exchangeTime || '') || '');
+      const sameTime = Number.isFinite(tradeStampMs) && Number.isFinite(existingStampMs)
+        && Math.abs(existingStampMs - tradeStampMs) <= 5000;
+      return sameOrder && sameAction && samePrice && sameAmount && sameTime;
+    });
+    const duplicate = duplicateIndex >= 0;
+
+    const oldOrderIndex = journal.findIndex(x =>
+      x.category === 'filled_order' &&
+      String(x.orderId || '') === orderId &&
+      String(x.pair || '').toLowerCase() === pair.toLowerCase()
+    );
+
+    const sample = await fetchHistoricalBitoPriceAt(stamp) || getBitoPriceNear(toIsoTimestamp(stamp));
+    const fee = Number(row.fee || 0);
+    const feeCurrency = String(row.feeSymbol || row.feeCurrency || row.fee_currency || '').toUpperCase();
+    const feeInfo = feeFields({ fee, feeCurrency }, new Date().toISOString(), sample);
+    const entry = {
+      category: 'filled_trade',
+      time: new Date().toISOString(),
+      exchangeTime: stamp,
+      pair: normalized.pair,
+      action: normalized.action,
+      price: normalized.price,
+      amount: normalized.amount,
+      tradeId: tradeId || stableTradeKey,
+      orderId: orderId || null,
+      matchID: tradeId || stableTradeKey,
+      isMaker: row.isMaker ?? (row.isTaker == null ? null : !row.isTaker),
+      orderType: row.orderType || row.type || 'LIMIT',
+      historical: true,
+      ...feeInfo,
+      result: 'filled'
+    };
+    if (duplicate) {
+      const existing = journal[duplicateIndex];
+      let enriched = false;
+      // Prefer verified historical candle data. Fill only missing values so existing
+      // confirmed values are not overwritten by a later, less precise lookup.
+      if ((existing.feeBitoTwdPrice == null || existing.feeTwdCost == null) && feeInfo.feeBitoTwdPrice != null) {
+        existing.feeBitoTwdPrice = feeInfo.feeBitoTwdPrice;
+        existing.feePriceTime = feeInfo.feePriceTime;
+        existing.feeTwdCost = feeInfo.feeTwdCost;
+        existing.feePriceStatus = feeInfo.feePriceStatus;
+        enriched = true;
+      }
+      if (existing.fee == null || Number(existing.fee) === 0) {
+        existing.fee = feeInfo.fee;
+        enriched = true;
+      }
+      if (!existing.feeCurrency && feeInfo.feeCurrency) {
+        existing.feeCurrency = feeInfo.feeCurrency;
+        enriched = true;
+      }
+      if (!existing.orderId && orderId) {
+        existing.orderId = orderId;
+        enriched = true;
+      }
+      if (!existing.tradeId || String(existing.tradeId).includes('|')) {
+        existing.tradeId = tradeId || stableTradeKey;
+        existing.matchID = tradeId || stableTradeKey;
+        enriched = true;
+      }
+      if (enriched) {
+        persist();
+        emit('journal', { entry: existing });
+        count++;
+      }
+      continue;
+    }
+
+    if (oldOrderIndex >= 0) {
+      // Replace the earlier order-level placeholder with the exchange's actual fill details.
+      entry.id = journal[oldOrderIndex].id || crypto.randomUUID();
+      // 同一訂單可能有多筆 match；移除該訂單所有 order-level 佔位列，再保留每筆實際成交明細。
+      journal = journal.filter(x => !(x.category === 'filled_order' && String(x.orderId || '') === orderId && String(x.pair || '').toLowerCase() === pair.toLowerCase()));
+      journal.unshift(entry);
+      journal = journal.slice(0, 10000);
+      persist();
+      emit('journal', { entry });
+    } else {
+      addJournal(entry);
+    }
+    count++;
+  }
+  // Repair existing journal entries whose BITO fee was recorded but whose TWD
+  // conversion is missing. This also repairs old live-stream rows that the REST
+  // backfill matched previously and therefore did not insert again.
+  let repairedFees = 0;
+  const feeRepairRows = journal.filter(e =>
+    e.category === 'filled_trade' &&
+    taipeiDate(e.exchangeTime || e.time) >= '2026-10-18' &&
+    String(e.feeCurrency || '').toUpperCase() === 'BITO' &&
+    Number(e.fee) > 0 &&
+    (e.feeTwdCost == null || !Number.isFinite(Number(e.feeTwdCost)))
+  );
+  for (const entry of feeRepairRows) {
+    // If a valid historical price is already present, calculate the cost without
+    // another network request.
+    const existingPrice = Number(entry.feeBitoTwdPrice);
+    if (existingPrice > 0 && Number.isFinite(existingPrice)) {
+      entry.feeTwdCost = Number(entry.fee) * existingPrice;
+      entry.feePriceStatus = entry.feePriceStatus || 'calculated_from_saved_price';
+      repairedFees++;
+      continue;
+    }
+    const stamp = entry.exchangeTime || entry.time;
+    const minuteKey = Math.floor(Date.parse(toIsoTimestamp(stamp) || '') / 60000);
+    if (Number.isFinite(minuteKey)) historicalBitoMinuteCache.delete(minuteKey);
+    const sample = await fetchHistoricalBitoPriceAt(stamp);
+    if (!sample || !(Number(sample.price) > 0)) continue;
+    entry.feeBitoTwdPrice = Number(sample.price);
+    entry.feePriceTime = sample.time;
+    entry.feeTwdCost = Number(entry.fee) * Number(sample.price);
+    entry.feePriceStatus = sample.source || 'bito_twd_1m_ohlc_close';
+    repairedFees++;
+  }
+  if (repairedFees > 0) {
+    persist();
+    emit('journal', { entries: feeRepairRows.filter(e => e.feeTwdCost != null) });
+  }
+  emit('info', { message: `已回補 2026/10/18 起（截至台灣時間 ${todayTaipei}）成交明細：更新／新增 ${count} 筆；補齊手續費台幣成本 ${repairedFees} 筆；10/18 以前不再補查歷史 BITO/TWD 報價。若歷史報價仍查不到，成本會保留待補，不套用目前價格。` });
+}
+
+async function updateAssetValuation() {
+  const usdtTwd = await getTickerPrice('usdt_twd');
+  const results = await Promise.all(balances.map(async item => {
+    const currency = item.currency.toLowerCase();
+    const amount = Number(item.amount || 0);
+    if (currency === 'twd') return { ...item, twdPrice: 1, twdValue: amount, availableTwdValue: Number(item.available || 0), lockedTwdValue: Math.max(0, amount - Number(item.available || 0)) };
+    let price = await getTickerPrice(`${currency}_twd`);
+    if (price == null && usdtTwd != null) {
+      const usdtPrice = await getTickerPrice(`${currency}_usdt`);
+      if (usdtPrice != null) price = usdtPrice * usdtTwd;
+    }
+    return { ...item, twdPrice: price, twdValue: price == null ? null : amount * price, availableTwdValue: price == null ? null : Number(item.available || 0) * price, lockedTwdValue: price == null ? null : Math.max(0, amount - Number(item.available || 0)) * price };
+  }));
+  const unpriced = results.filter(x => x.twdValue == null && Number(x.amount || 0) !== 0).map(x => x.currency);
+  const allPriced = unpriced.length === 0;
+  assetValuation = {
+    totalTwd: allPriced ? results.reduce((sum, x) => sum + Number(x.twdValue || 0), 0) : null,
+    pricedCurrencies: results.filter(x => x.twdValue != null).map(x => x.currency),
+    unpricedCurrencies: unpriced,
+    updatedAt: new Date().toISOString()
+  };
+  balances = results;
+  emit('balances', { balances, assetValuation });
+  return balances;
+}
+async function getAccountBalance() {
+  if (!credentialsReady()) throw new Error('請先在 .env 設定 API 金鑰');
+  const response = await axios.get('https://api.bitopro.com/v3/accounts/balance', { headers: authHeaders(), timeout: 15000 });
+  balances = (response.data.data || []).map(x => ({
+    currency: String(x.currency).toUpperCase(),
+    amount: Number(x.amount || 0),
+    available: Number(x.available || 0)
+  }));
+  await updateAssetValuation();
+  return balances;
+}
+function calculateTarget(pair, sourcePrice, sourceAction) {
+  const spread = SPREADS[pair];
+  if (!Number.isFinite(spread)) return null;
+  const price = Number(sourcePrice) + (sourceAction === 'BUY' ? spread : -spread);
+  if (!Number.isFinite(price) || price <= 0) return null;
+  return { action: sourceAction === 'BUY' ? 'SELL' : 'BUY', price: String(price.toFixed(8)).replace(/0+$/, '').replace(/\.$/, '') };
+}
+const pairPricePrecisionCache = new Map();
+async function getPairPricePrecision(pair) {
+  const cached = pairPricePrecisionCache.get(pair);
+  if (cached && Date.now() - cached.at < 10 * 60 * 1000) return cached.precision;
+  const response = await axios.get('https://api.bitopro.com/v3/provisioning/trading-pairs', { timeout: 8000 });
+  const root = response.data?.data ?? response.data;
+  const rows = Array.isArray(root) ? root : [];
+  const info = rows.find(item => String(item.pair || '').toLowerCase() === pair);
+  const precision = Number(info?.quotePrecision);
+  if (!Number.isInteger(precision) || precision < 0 || precision > 12) {
+    throw new Error('無法取得 ' + pair.toUpperCase() + ' 的有效 quotePrecision，為避免價格不符合交易所規則，停止自動掛單。');
+  }
+  pairPricePrecisionCache.set(pair, { precision, at: Date.now() });
+  return precision;
+}
+function roundPriceToPrecision(value, precision, mode) {
+  const factor = 10 ** precision;
+  const scaled = value * factor;
+  const epsilon = 1e-9;
+  const rounded = mode === 'ceil' ? Math.ceil(scaled - epsilon) : Math.floor(scaled + epsilon);
+  return rounded / factor;
+}
+function formatOrderPrice(value, precision) {
+  return value.toFixed(precision).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
+}
+async function getMakerSafeCounterPrice(pair, action, originalTargetPrice, options = {}) {
+  const results = await Promise.all([
+    getPairPricePrecision(pair),
+    axios.get('https://api.bitopro.com/v3/order-book/' + pair, { params: { limit: 5 }, timeout: 8000 })
+  ]);
+  const precision = results[0];
+  const book = results[1].data?.data ?? results[1].data;
+  const bids = Array.isArray(book?.bids) ? book.bids.map(row => Number(row.price)).filter(price => price > 0) : [];
+  const asks = Array.isArray(book?.asks) ? book.asks.map(row => Number(row.price)).filter(price => price > 0) : [];
+  if (!bids.length || !asks.length) throw new Error('無法取得 ' + pair.toUpperCase() + ' 完整買賣盤，為避免誤成 Taker，暫停掛單。');
+  const bestBid = Math.max(...bids);
+  const bestAsk = Math.min(...asks);
+  if (!(bestAsk > bestBid)) throw new Error('目前 ' + pair.toUpperCase() + ' 買賣盤異常（買一 ' + bestBid + '、賣一 ' + bestAsk + '），暫停掛單。');
+  const tick = 10 ** -precision;
+  const baseTarget = action === 'SELL'
+    ? roundPriceToPrecision(originalTargetPrice, precision, 'ceil')
+    : roundPriceToPrecision(originalTargetPrice, precision, 'floor');
+  // SELL 必須高於買一；BUY 必須低於賣一。調整價格只能朝策略有利方向。
+  const makerBoundary = action === 'SELL' ? bestBid + tick : bestAsk - tick;
+  // 固定格子回補買單必須守住原始買價；若該價格會立即成交，就暫停而不是偷偷下修價格。
+  if (options.strictPrice && action === 'BUY' && baseTarget >= bestAsk) {
+    throw new Error('原始買價 ' + formatOrderPrice(baseTarget, precision) + ' 已不符合 POST_ONLY（目前賣一 ' + bestAsk + '）；保留原價，不改價送單。');
+  }
+  const finalPrice = options.strictPrice
+    ? baseTarget
+    : (action === 'SELL'
+      ? Math.max(baseTarget, roundPriceToPrecision(makerBoundary, precision, 'ceil'))
+      : Math.min(baseTarget, roundPriceToPrecision(makerBoundary, precision, 'floor')));
+  if (!(finalPrice > 0)) throw new Error('計算出的 Maker 價格無效：' + pair.toUpperCase() + ' ' + action + ' ' + finalPrice);
+  if (action === 'SELL' && finalPrice + 1e-12 < baseTarget) throw new Error('賣價低於原定最低賣價，已阻止掛單。');
+  if (action === 'BUY' && finalPrice - 1e-12 > baseTarget) throw new Error('買價高於原定最高買價，已阻止掛單。');
+  return { precision, price: finalPrice, priceText: formatOrderPrice(finalPrice, precision), targetPrice: baseTarget, bestBid, bestAsk, tick };
+}
+async function placeCounterOrder(fill) {
+  if (!PAIRS.includes(fill.pair)) {
+    logOrderConsole('error', '反向委託失敗：交易對不在支援清單', { pair: fill.pair, sourceOrderId: fill.sourceOrderId || null, status: 'FAILED' });
+    emit('error', { message: '反向委託失敗：交易對不在支援清單 ' + fill.pair });
+    return;
+  }
+  const gridId = fill.gridId || ('GRID-' + crypto.randomUUID());
+  const originalBuyPrice = Number(fill.originalBuyPrice || (fill.action === 'BUY' ? fill.price : 0));
+  const originalSpread = Number(fill.originalSpread ?? SPREADS[fill.pair]);
+  const originalSellPrice = Number(fill.originalSellPrice || (originalBuyPrice > 0 ? originalBuyPrice + originalSpread : 0));
+  const restoringOriginalBuy = fill.action === 'SELL' && originalBuyPrice > 0;
+  const target = restoringOriginalBuy
+    ? { action: 'BUY', price: String(originalBuyPrice) }
+    : (fill.action === 'BUY' && fill.gridId && originalBuyPrice > 0
+      ? { action: 'SELL', price: String(originalSellPrice) }
+      : calculateTarget(fill.pair, fill.price, fill.action));
+  if (!target) {
+    logOrderConsole('error', '反向委託失敗：無法計算目標價格', { pair: fill.pair, sourceAction: fill.action, sourcePrice: fill.price, spread: SPREADS[fill.pair], status: 'FAILED' });
+    emit('warning', { message: '無法計算反向掛單價格：' + fill.pair });
+    return;
+  }
+  const amount = Number(fill.originalAmount || fill.executedAmount || 0);
+  if (!(amount > 0)) {
+    logOrderConsole('error', '反向委託失敗：成交數量無效', { pair: fill.pair, amount, sourceOrderId: fill.sourceOrderId || null, status: 'FAILED' });
+    emit('error', { message: '反向委託失敗：成交數量無效 ' + fill.pair });
+    return;
+  }
+  const originalTargetPrice = Number(target.price);
+  // 反向買單允許在市場跌破原目標時向下調整；反向賣單允許在市場突破原目標時向上調整。
+  // 兩者都由 getMakerSafeCounterPrice 依最新 order book 計算 Maker 價格。
+  const strictOriginalBuyPrice = false;
+  const sourceOrderKey = fill.sourceOrderKey || null;
+  let lastError = null;
+  let lastMakerQuote = null;
+  let lastAttempt = 0;
+  const previousSignal = sourceOrderKey ? [...journal].reverse().find(entry =>
+    entry.category === 'counter_order_signal' && entry.sourceOrderKey === sourceOrderKey
+  ) : null;
+  const previousResult = String(previousSignal?.result || '').toLowerCase();
+  if (previousSignal && ['exchange_accepted', 'submitted', 'pending', 'dry_run', 'unknown'].includes(previousResult)) {
+    logOrderConsole('warn', '反向委託略過：來源訂單已有有效或待核對紀錄（防止重複送單）', {
+      pair: fill.pair, sourceOrderId: fill.sourceOrderId || sourceOrderKey,
+      previousResult, status: 'SKIPPED_DUPLICATE'
+    });
+    emit('warning', { message: '原始訂單 ' + (fill.sourceOrderId || sourceOrderKey) + ' 已有反向委託紀錄，略過重複觸發。' });
+    return;
+  }
+  // 每次 POST_ONLY 拒絕後重新讀取買賣盤並重算；網路逾時不盲目重送。
+  const maxAttempts = LIVE_TRADING ? 3 : 1;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    lastAttempt = attempt;
+    try { lastMakerQuote = await getMakerSafeCounterPrice(fill.pair, target.action, originalTargetPrice, { strictPrice: strictOriginalBuyPrice }); }
+    catch (err) {
+      lastError = err;
+      logOrderConsole('warn', '反向委託暫時無法取得 Maker 安全價格', { pair: fill.pair, action: target.action, attempt, error: err.message, status: 'WAITING_MAKER_PRICE' });
+      // 讀取報價或計算 Maker 價格暫時失敗時，最多重新讀取三次。
+      if (attempt < maxAttempts) {
+        emit('warning', { message: '反向委託暫時無法取得有效 Maker 價格，將重新讀取買賣盤（' + attempt + '/' + maxAttempts + '）：' + err.message });
+        await new Promise(resolve => setTimeout(resolve, 500 * attempt));
+        continue;
+      }
+      break;
+    }
+    const price = lastMakerQuote.price;
+    const priceText = lastMakerQuote.priceText;
+    const estimatedGross = Math.abs(price - Number(fill.price)) * amount;
+    const estimatedFee = (Math.abs(Number(fill.price) * amount) + Math.abs(price * amount)) * FEE_RATE;
+    const entry = {
+      category: 'counter_order_signal', pair: fill.pair,
+      gridId, originalBuyPrice: originalBuyPrice || null, originalSellPrice: originalSellPrice || null, originalSpread,
+      restoresOriginalBuyPrice: strictOriginalBuyPrice,
+      sourceOrderId: fill.sourceOrderId || fill.orderId || null, sourceOrderKey,
+      sourceAction: fill.action, sourcePrice: Number(fill.price), targetPrice: lastMakerQuote.targetPrice,
+      action: target.action, price, amount, spread: originalSpread,
+      bestBidAtSubmit: lastMakerQuote.bestBid, bestAskAtSubmit: lastMakerQuote.bestAsk, priceTick: lastMakerQuote.tick,
+      estimatedGross, estimatedFee, estimatedNet: estimatedGross - estimatedFee,
+      live: LIVE_TRADING, result: LIVE_TRADING ? 'pending' : 'dry_run'
+    };
+    const payload = { action: target.action, amount: String(amount), price: priceText, timestamp: apiTimestamp(), type: 'LIMIT', timeInForce: 'POST_ONLY' };
+    if (!LIVE_TRADING) {
+      addJournal({ ...entry, live: false, result: 'dry_run', requestPreview: { method: 'POST', path: '/v3/orders/' + fill.pair, payload, note: 'LIVE_TRADING=false：只預覽，不會送出交易所委託；價格已依最新買賣盤計算為 Maker 安全價' } });
+      emit('dryrun', { message: '反向委託預覽（未送單）：' + fill.pair + ' ' + target.action + ' ' + amount + ' @ ' + priceText + '；原目標價 ' + formatOrderPrice(lastMakerQuote.targetPrice, lastMakerQuote.precision) });
+      return;
+    }
+    if (!credentialsReady()) {
+      addJournal({ ...entry, live: false, result: 'error', error: '缺少 BitoPro API 憑證' });
+      logOrderConsole('error', '反向委託失敗：缺少 BitoPro API 憑證', { pair: fill.pair, action: target.action, amount, status: 'FAILED' });
+      emit('error', { message: '自動反向委託未送出：請設定 BITOPRO_API_KEY、BITOPRO_API_SECRET、BITOPRO_EMAIL。' });
+      return;
+    }
+    const attemptPayload = { ...payload, timestamp: apiTimestamp() };
+    logOrderConsole('info', '反向 Maker 委託建立中（第 ' + attempt + '/' + maxAttempts + ' 次）', { pair: fill.pair, action: target.action, amount, targetPrice: lastMakerQuote.targetPrice, price, bestBid: lastMakerQuote.bestBid, bestAsk: lastMakerQuote.bestAsk, tick: lastMakerQuote.tick, timestamp: attemptPayload.timestamp });
+    try {
+      // 系統依完整成交事件與既定格線自動建立反向委託，不要求人工 Authenticator 解鎖。
+      // 手動新增、修改、撤單仍由 security/http.js 的 apiGate 強制驗證。
+      const response = await axios.post('https://api.bitopro.com/v3/orders/' + fill.pair, attemptPayload, { headers: signedOrderHeaders(attemptPayload, true), timeout: 15000 });
+      const result = response.data?.data ?? response.data;
+      const orderId = result?.orderId || result?.id || result?.order_id || null;
+      addJournal({ ...entry, live: true, result: 'exchange_accepted', orderId, retryCount: attempt - 1, exchangeResponse: result });
+      const successMessage = '交易所已回應反向 Maker 委託：' + fill.pair + ' ' + target.action + ' ' + amount + ' @ ' + priceText + (orderId ? '（訂單 ' + orderId + '）' : '（未取得訂單 ID，請核對交易所掛單）') + (attempt > 1 ? '（第 ' + attempt + ' 次重試成功）' : '');
+      logOrderConsole('info', '建立訂單狀態：成功（交易所已接受）', { pair: fill.pair, action: target.action, amount, price, orderId, attempt, status: 'SUCCESS', exchangeResponse: result });
+      emit('info', { message: successMessage });
+      return;
+    } catch (err) {
+      lastError = err;
+      const errorText = apiErrorMessage(err);
+      logOrderConsole('error', '建立訂單狀態：失敗（第 ' + attempt + '/' + maxAttempts + ' 次）', { pair: fill.pair, action: target.action, amount, targetPrice: lastMakerQuote.targetPrice, price, httpStatus: err.response?.status || null, error: errorText, networkError: !err.response, status: 'FAILED' });
+      if (!err.response) break;
+      // 有明確 HTTP 回應代表交易所拒絕本次建立請求；重新讀取 order book 後最多再試。
+      // 沒有 HTTP 回應的逾時屬於結果不明，不能盲目重送，以免交易所已收單卻重複建立。
+      if (attempt >= maxAttempts) break;
+      emit('warning', { message: '反向委託建立遭交易所拒絕，將重新查詢買賣盤並重試（' + attempt + '/' + maxAttempts + '）：' + errorText });
+      await new Promise(resolve => setTimeout(resolve, 300 * attempt));
+    }
+  }
+  const isUnknown = !!(lastError && !lastError.response);
+  const message = lastError ? (isUnknown
+    ? '連線中斷或逾時，交易所是否接受委託尚未確認；已停止重送並鎖定此來源成交，請先查詢交易所掛單與委託歷史。'
+    : apiErrorMessage(lastError)) : '無法取得最新買賣盤，已停止送單。';
+  const failedPrice = lastMakerQuote?.price ?? originalTargetPrice;
+  addJournal({ category: 'counter_order_signal', pair: fill.pair, gridId, originalBuyPrice: originalBuyPrice || null, originalSellPrice: originalSellPrice || null, originalSpread, restoresOriginalBuyPrice: strictOriginalBuyPrice, sourceOrderId: fill.sourceOrderId || fill.orderId || null, sourceOrderKey, sourceAction: fill.action, sourcePrice: Number(fill.price), targetPrice: originalTargetPrice, action: target.action, price: failedPrice, amount, spread: originalSpread, live: LIVE_TRADING, result: isUnknown ? 'unknown' : 'error', error: message, statusNeedsReconciliation: isUnknown, httpStatus: lastError?.response?.status || null, retryCount: Math.max(0, lastAttempt - 1) });
+  logOrderConsole(isUnknown ? 'warn' : 'error', isUnknown ? '建立訂單結果不明：等待人工核對' : '建立訂單最終狀態：失敗', { pair: fill.pair, action: target.action, amount, targetPrice: originalTargetPrice, price: failedPrice, httpStatus: lastError?.response?.status || null, error: message, status: isUnknown ? 'UNKNOWN_NEEDS_RECONCILIATION' : 'FAILED' });
+  emit(isUnknown ? 'warning' : 'error', { message: (isUnknown ? '反向 Maker 委託結果待核對：' : '反向 Maker 委託建立失敗：') + message });
+}
+// WebSocket 首次快照（包含重新連線）到達後，以本機既有訂單 ID 對接交易所狀態。
+// 不重建訂單、不修改原訂單參數；只有交易所確認完整成交才交由既有反向策略處理。
+const reconcilingOrders = new Set();
+async function reconcileExistingOrders(reason = 'websocket_reconnected') {
+  if (!credentialsReady()) return { checked: 0, completed: 0 };
+  const tracked = journal.filter(entry =>
+    entry && entry.orderId && validPair(String(entry.pair || '').toLowerCase()) &&
+    ['manual_exchange_order', 'manual_exchange_order_edit', 'counter_order_signal'].includes(entry.category) &&
+    entry.live === true && ['exchange_accepted', 'submitted', 'pending'].includes(entry.result)
+  );
+  const unique = new Map();
+  for (const entry of tracked) {
+    const pair = String(entry.pair).toLowerCase();
+    const id = String(entry.orderId);
+    unique.set(pair + '|' + id, { pair, id });
+  }
+  let checked = 0;
+  let completed = 0;
+  logOrderConsole('info', '開始以原訂單 ID 同步交易所狀態', { reason, orderCount: unique.size });
+  for (const { pair, id } of unique.values()) {
+    const key = pair + '|' + id;
+    if (reconcilingOrders.has(key)) continue;
+    reconcilingOrders.add(key);
+    try {
+      const response = await axios.get(
+        'https://api.bitopro.com/v3/orders/' + pair + '/' + encodeURIComponent(id),
+        { headers: authHeaders(), timeout: 12000 }
+      );
+      const order = response.data?.data ?? response.data;
+      checked++;
+      const originalAmount = Number(order?.originalAmount);
+      const executedAmount = Number(order?.executedAmount);
+      const statusCode = Number(order?.status);
+      // 將交易所狀態附加回原本的本機訂單紀錄，不另建訂單、不更換原訂單 ID。
+      const localRecord = [...journal].reverse().find(entry =>
+        String(entry.orderId || '') === id &&
+        String(entry.pair || '').toLowerCase() === pair &&
+        ['manual_exchange_order', 'manual_exchange_order_edit', 'counter_order_signal'].includes(entry.category)
+      );
+      if (localRecord) {
+        localRecord.exchangeStatus = order?.status ?? null;
+        localRecord.exchangeOriginalAmount = Number.isFinite(originalAmount) ? originalAmount : null;
+        localRecord.exchangeExecutedAmount = Number.isFinite(executedAmount) ? executedAmount : null;
+        localRecord.lastStatusSyncAt = new Date().toISOString();
+        persist();
+        emit('journal', { entry: localRecord });
+      }
+      // 僅接受交易所明確回報的完整成交；部分成交/撤單/未知狀態只同步觀察，不觸發反向單。
+      if (originalAmount > 0 && executedAmount === originalAmount && statusCode === 2) {
+        completed++;
+        await handleCompletedOrder(pair, {
+          ...order,
+          id: order.id || order.orderID || order.orderId || id
+        }, 'reconnect_order_reconciliation');
+      }
+      logOrderConsole('info', '原訂單狀態同步完成', {
+        pair, orderId: id, exchangeStatus: order?.status ?? null,
+        originalAmount, executedAmount,
+        fullFilled: originalAmount > 0 && executedAmount === originalAmount && statusCode === 2
+      });
+    } catch (err) {
+      logOrderConsole('warn', '原訂單狀態同步失敗，保留原本本機紀錄等待下次重連', {
+        pair, orderId: id, error: apiErrorMessage(err)
+      });
+    } finally {
+      reconcilingOrders.delete(key);
+    }
+  }
+  emit('info', { message: '重新連線訂單同步完成：查詢 ' + checked + ' 筆，確認完整成交 ' + completed + ' 筆；原訂單 ID 與參數均未重建。' });
+  return { checked, completed };
+}
+
+function processHistoryMessage(raw) {
+  const rawText = raw.toString();
+  let msg;
+  try {
+    msg = JSON.parse(rawText);
+  } catch (err) {
+    logOrderConsole('error', '訂單歷史 WebSocket 收到非 JSON 訊息', { error: err.message, rawPreview: rawText.slice(0, 500) });
+    return;
+  }
+  const data = msg && msg.data;
+  const dataKeys = data && typeof data === 'object' ? Object.keys(data) : [];
+  const pairSummary = {};
+  if (data && typeof data === 'object') {
+    for (const key of dataKeys) {
+      if (Array.isArray(data[key])) pairSummary[key] = data[key].length;
+    }
+  }
+  logOrderConsole('info', '收到訂單歷史 WebSocket 訊息', {
+    firstLoad, event: msg.event || null, messageKeys: Object.keys(msg),
+    dataType: Array.isArray(data) ? 'array' : typeof data,
+    dataKeys: dataKeys.slice(0, 30), pairArrayCounts: pairSummary,
+    rawPreview: rawText.slice(0, 800)
+  });
+  if (firstLoad) {
+    firstLoad = false;
+    logOrderConsole('info', '已收到訂單歷史首次快照；開始依本機保存的原訂單 ID 對接交易所狀態', {
+      dataKeys: dataKeys.slice(0, 30), pairArrayCounts: pairSummary
+    });
+    reconcileExistingOrders('history_websocket_first_snapshot').catch(err =>
+      logOrderConsole('error', '重新連線後訂單狀態同步發生錯誤', { error: err.message })
+    );
+    return;
+  }
+  if (!data || typeof data !== 'object') {
+    logOrderConsole('warn', '訂單歷史訊息格式異常：缺少 data', { receivedType: typeof data });
+    return;
+  }
+  for (const pair of PAIRS) {
+    const orders = data[pair];
+    if (!Array.isArray(orders)) continue;
+    for (const item of orders) {
+      const originalAmount = Number(item.originalAmount);
+      const executedAmount = Number(item.executedAmount);
+      const orderStatus = Number(item.status);
+      if (originalAmount !== executedAmount || orderStatus !== 2) {
+        if (String(item.action || '').toUpperCase() === 'SELL' && executedAmount > 0) {
+          logOrderConsole('info', '賣單尚未符合反向買單觸發條件', {
+            pair, orderId: item.id || item.orderId || item.order_id || null,
+            originalAmount, executedAmount, exchangeStatus: item.status,
+            reason: originalAmount !== executedAmount ? '尚未完整成交' : '訂單狀態不是 2'
+          });
+        }
+        continue;
+      }
+      handleCompletedOrder(pair, item, 'order_history').catch(err =>
+        logOrderConsole('error', '處理已完成訂單失敗', { pair, orderId: item.id || item.orderId || null, error: err.message })
+      );
+    }
+  }
+}
+
+const seenFills = new Set();
+const pendingOrderChecks = new Set();
+
+async function handleCompletedOrder(pair, item, source = 'unknown') {
+  const originalAmount = Number(item.originalAmount);
+  const executedAmount = Number(item.executedAmount);
+  const orderStatus = Number(item.status);
+  const action = String(item.action || '').toUpperCase();
+  const sourceOrderId = String(item.id || item.orderID || item.orderId || item.order_id || '');
+  const price = Number(item.price);
+  if (!PAIRS.includes(pair) || !sourceOrderId || !['BUY', 'SELL'].includes(action) ||
+      !(price > 0) || !(originalAmount > 0) || originalAmount !== executedAmount || orderStatus !== 2) {
+    logOrderConsole('info', '訂單尚未符合反向委託條件', {
+      source, pair, sourceOrderId: sourceOrderId || null, action,
+      originalAmount, executedAmount, exchangeStatus: item.status,
+      reason: originalAmount !== executedAmount ? '尚未完整成交' : (orderStatus !== 2 ? '訂單狀態不是 2' : '訂單欄位不完整')
+    });
+    return;
+  }
+  const dedupeKey = `${pair}|${sourceOrderId}|${action}|${item.price}|${item.executedAmount}`;
+  // 系統反向單沿用原格子的 ID、原始買價及原始價差。
+  const parentSignal = journal.find(entry =>
+    entry.category === 'counter_order_signal' &&
+    String(entry.orderId || '') === sourceOrderId &&
+    String(entry.pair || '').toLowerCase() === pair.toLowerCase()
+  );
+  const configuredSpread = Number(SPREADS[pair]);
+  const gridContext = parentSignal?.gridId ? {
+    gridId: parentSignal.gridId,
+    originalBuyPrice: Number(parentSignal.originalBuyPrice),
+    originalSellPrice: Number(parentSignal.originalSellPrice || (Number(parentSignal.originalBuyPrice) + Number(parentSignal.originalSpread ?? parentSignal.spread))),
+    originalSpread: Number(parentSignal.originalSpread ?? parentSignal.spread),
+    gridContextSource: 'existing_strategy_grid'
+  } : (action === 'BUY' ? {
+    // 無論 BUY 來自本網頁或 BitoPro 官方 App／網站，首次成交都建立一組新格線。
+    gridId: 'GRID-' + crypto.randomUUID(),
+    originalBuyPrice: price,
+    originalSellPrice: price + configuredSpread,
+    originalSpread: configuredSpread,
+    gridContextSource: 'standalone_buy_fill'
+  } : (Number.isFinite(configuredSpread) && configuredSpread >= 0 && price - configuredSpread > 0 ? {
+    // 獨立 SELL 成交（例如官方 App 手動掛單）以成交價為賣格，依目前策略價差推導下一個 BUY 格。
+    // 之後該 BUY 成交時，會沿用這組 gridId 與原始價位，恢復同一格線循環。
+    gridId: 'GRID-' + crypto.randomUUID(),
+    originalBuyPrice: price - configuredSpread,
+    originalSellPrice: price,
+    originalSpread: configuredSpread,
+    gridContextSource: 'standalone_sell_fill'
+  } : null));
+  // 僅在反向單已被交易所接受、模擬預覽或結果不明時阻擋重複觸發。
+  // 明確失敗的紀錄允許下一次相同完整成交事件重新嘗試，避免一次暫時性錯誤永久鎖死格線。
+  const previousCounterSignal = [...journal].reverse().find(entry =>
+    entry.category === 'counter_order_signal' && entry.sourceOrderKey === dedupeKey
+  );
+  const previousResult = String(previousCounterSignal?.result || '').toLowerCase();
+  const previousAttemptBlocksRetry = previousCounterSignal &&
+    ['exchange_accepted', 'pending', 'dry_run', 'unknown'].includes(previousResult);
+  if (seenFills.has(dedupeKey) || previousAttemptBlocksRetry) {
+    logOrderConsole('warn', '完整成交已偵測但略過反向委託：防重複', {
+      pair, sourceOrderId, action, source, previousResult: previousResult || null,
+      status: 'SKIPPED_DUPLICATE'
+    });
+    return;
+  }
+  logOrderConsole('info', '偵測到完整成交，準備建立反向委託', {
+    source, pair, sourceOrderId, sourceAction: action,
+    counterAction: action === 'SELL' ? 'BUY' : 'SELL',
+    price, amount: executedAmount, liveTrading: LIVE_TRADING
+  });
+  emit('fill', { message: '完整委託：' + pair.toUpperCase() + ' ' + action + ' ' + executedAmount + ' @ ' + item.price });
+  try {
+    if (!gridContext) {
+      emit('warning', { message: '成交已確認，但目前價差設定無法建立有效格線價格；未送出反向委託。來源訂單：' + sourceOrderId });
+      addJournal({ category: 'grid_cycle_warning', pair, sourceOrderId, sourceOrderKey: dedupeKey, result: 'invalid_grid_context', message: '無法依目前價差設定建立有效的下一格價格。' });
+      return;
+    }
+    // 僅在格線上下文確認有效後才加入記憶體去重集合，避免無效價差造成永久鎖單。
+    seenFills.add(dedupeKey);
+    if (seenFills.size > 20000) seenFills.clear();
+
+    if (gridContext.gridContextSource === 'standalone_sell_fill') {
+      logOrderConsole('info', '獨立 SELL 成交已建立新格線，準備自動回補 BUY', {
+        pair, sourceOrderId, fillPrice: price, nextBuyPrice: gridContext.originalBuyPrice,
+        spread: gridContext.originalSpread, gridId: gridContext.gridId
+      });
+      emit('info', { message: '已辨識獨立 SELL 成交並建立新格線：下一格 BUY 目標 ' + gridContext.originalBuyPrice });
+    }
+    await placeCounterOrder({
+      pair, price, action, originalAmount: executedAmount, executedAmount,
+      sourceOrderId, sourceOrderKey: dedupeKey,
+      ...gridContext
+    });
+    // 交易所明確拒絕／設定錯誤等可確認失敗，不應永久佔用去重鎖；
+    // timeout/連線中斷的 unknown 則保留鎖，必須先人工核對交易所，避免重複下單。
+    const latestCounterSignal = [...journal].reverse().find(entry =>
+      entry.category === 'counter_order_signal' && entry.sourceOrderKey === dedupeKey
+    );
+    if (!latestCounterSignal || ['error', 'failed'].includes(String(latestCounterSignal.result || '').toLowerCase())) {
+      seenFills.delete(dedupeKey);
+      logOrderConsole('warn', latestCounterSignal
+        ? '反向委託為明確失敗，已解除本機去重鎖；等待下一次成交同步事件重試'
+        : '反向委託未建立任何送單紀錄，已解除本機去重鎖；可於修正設定後重新同步', {
+        pair, sourceOrderId, result: latestCounterSignal?.result || 'no_signal_record'
+      });
+    }
+  } catch (err) {
+    if (!journal.some(entry => entry.category === 'counter_order_signal' && entry.sourceOrderKey === dedupeKey)) {
+      seenFills.delete(dedupeKey);
+    }
+    throw err;
+  }
+}
+
+async function checkUserTradeOrder(pair, tradeData) {
+  const orderId = String(tradeData.orderID || tradeData.orderId || tradeData.order_id || '');
+  if (!PAIRS.includes(pair) || !orderId) {
+    logOrderConsole('warn', '即時成交缺少有效交易對或訂單編號，無法核對完整成交', {
+      pair, orderId: orderId || null, tradeDataKeys: Object.keys(tradeData || {})
+    });
+    return;
+  }
+  const pendingKey = pair + '|' + orderId;
+  if (pendingOrderChecks.has(pendingKey)) return;
+  pendingOrderChecks.add(pendingKey);
+  try {
+    let order = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const response = await axios.get(
+          'https://api.bitopro.com/v3/orders/' + pair + '/' + encodeURIComponent(orderId),
+          { headers: authHeaders(), timeout: 10000 }
+        );
+        order = response.data?.data ?? response.data;
+      } catch (err) {
+        logOrderConsole('warn', '即時成交後查詢原始訂單失敗', {
+          pair, orderId, attempt, error: apiErrorMessage(err)
+        });
+      }
+      if (order && Number(order.originalAmount) === Number(order.executedAmount) && Number(order.status) === 2) break;
+      if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 300 * attempt));
+    }
+    if (!order) {
+      logOrderConsole('error', '即時成交後仍無法取得原始訂單資料，未送出反向委託', { pair, orderId });
+      return;
+    }
+    await handleCompletedOrder(pair, order, 'user_trade_order_lookup');
+  } finally {
+    pendingOrderChecks.delete(pendingKey);
+  }
+}
+
+let tradeWs = null;
+let tradeReconnectTimer = null;
+function connectUserTradeSocket() {
+  if (!running || !credentialsReady()) return;
+  try {
+    tradeWs = new WebSocket('wss://stream.bitopro.com:443/ws/v1/pub/auth/user-trades', { headers: authHeaders() });
+    tradeWs.on('open', () => {
+      logBitoConnection('info', 'User Trade Stream 已連線', { url: 'wss://stream.bitopro.com:443/ws/v1/pub/auth/user-trades' });
+      logOrderConsole('info', 'User Trade Stream 已建立連線', { url: 'wss://stream.bitopro.com:443/ws/v1/pub/auth/user-trades' });
+      reconcileExistingOrders('user_trade_websocket_connected').catch(err => logOrderConsole('error', 'User Trade 重新連線後同步訂單失敗', { error: err.message }));
+    });
+    tradeWs.on('unexpected-response', (request, response) => {
+      logBitoConnection('error', 'User Trade Stream 握手遭拒絕', {
+        httpStatus: response.statusCode || null,
+        statusMessage: response.statusMessage || null
+      });
+      response.resume();
+    });
+    tradeWs.on('message', raw => {
+      const rawText = raw.toString();
+      let msg;
+      try { msg = JSON.parse(rawText); }
+      catch (err) {
+        logOrderConsole('error', 'User Trade Stream 收到非 JSON 訊息', { error: err.message, rawPreview: rawText.slice(0, 500) });
+        return;
+      }
+      logOrderConsole('info', '收到 User Trade Stream 訊息', {
+        event: msg?.event || null, messageKeys: Object.keys(msg || {}),
+        dataKeys: msg?.data && typeof msg.data === 'object' ? Object.keys(msg.data) : [],
+        rawPreview: rawText.slice(0, 800)
+      });
+      if (msg?.event !== 'USER_TRADE' || !msg.data) return;
+      const tradePair = (String(msg.data.base || '') + '_' + String(msg.data.quote || '')).toLowerCase();
+      logOrderConsole('info', '偵測到即時成交事件，開始核對原始訂單是否完整成交', {
+        pair: tradePair,
+        action: msg.data.side || msg.data.action || null,
+        price: msg.data.price || null,
+        amount: msg.data.volume || msg.data.baseAmount || msg.data.amount || null,
+        orderId: msg.data.orderID || msg.data.orderId || msg.data.order_id || null
+      });
+      recordUserTrade({ ...msg.data, timestamp: msg.data.transactionTimestamp || msg.timestamp }, tradePair, false)
+        .catch(err => emit('error', { message: '記錄即時成交失敗：' + err.message }));
+      checkUserTradeOrder(tradePair, msg.data).catch(err =>
+        logOrderConsole('error', '即時成交核對原始訂單時發生錯誤', {
+          pair: tradePair, orderId: msg.data.orderID || msg.data.orderId || null, error: err.message
+        })
+      );
+    });
+    tradeWs.on('error', err => logBitoConnection('error', `User Trade Stream 連線錯誤：${err.message}`, {
+      code: err.code || null
+    }));
+    tradeWs.on('close', (code, reason) => {
+      tradeWs = null;
+      logBitoConnection('warn', 'User Trade Stream 已斷線', {
+        closeCode: code,
+        reason: reason?.toString() || '',
+        reconnectInMs: running ? 5000 : null
+      });
+      if (running) tradeReconnectTimer = setTimeout(connectUserTradeSocket, 5000);
+    });
+  } catch (err) {
+    emit('warning', { message: `無法建立 User Trade Stream：${err.message}` });
+    if (running) tradeReconnectTimer = setTimeout(connectUserTradeSocket, 5000);
+  }
+}
+
+function connectHistorySocket() {
+  if (!running) return;
+  if (!credentialsReady()) {
+    setStatus('needs_config', '請先設定 .env 的 API 認證資料');
+    return;
+  }
+  firstLoad = true;
+  setStatus('reconnecting', '正在嘗試連接訂單歷史，連線成功後同步原訂單狀態');
+  try {
+    ws = new WebSocket('wss://stream.bitopro.com:443/ws/v1/pub/auth/orders/histories', { headers: authHeaders() });
+    ws.on('open', () => {
+      logBitoConnection('info', 'BitoPro 訂單歷史 WebSocket 已連線', { url: 'wss://stream.bitopro.com:443/ws/v1/pub/auth/orders/histories' });
+      logOrderConsole('info', '訂單歷史 WebSocket 已建立連線', { url: 'wss://stream.bitopro.com:443/ws/v1/pub/auth/orders/histories', liveTrading: LIVE_TRADING, pairs: PAIRS });
+      setStatus('connected', 'Histories WebSocket 已連線');
+      getAccountBalance().catch(err => {
+        setStatus('error', '取得餘額失敗', err.response?.data || err.message);
+      });
+    });
+    ws.on('message', processHistoryMessage);
+    ws.on('unexpected-response', (request, response) => {
+      logBitoConnection('error', 'BitoPro 訂單歷史 WebSocket 握手遭拒絕', {
+        httpStatus: response.statusCode || null,
+        statusMessage: response.statusMessage || null
+      });
+      response.resume();
+    });
+    ws.on('error', err => {
+      logBitoConnection('error', `BitoPro 訂單歷史 WebSocket 連線錯誤：${err.message}`, {
+        code: err.code || null
+      });
+      setStatus('error', 'WebSocket 錯誤', err.message);
+    });
+    ws.on('close', (code, reason) => {
+      ws = null;
+      if (!running) return;
+      logBitoConnection('warn', 'BitoPro 訂單歷史 WebSocket 已斷線，5 秒後重試', {
+        closeCode: code,
+        reason: reason?.toString() || '',
+        reconnectInMs: 5000
+      });
+      setStatus('reconnecting', '連線已關閉，5 秒後重試');
+      reconnectTimer = setTimeout(connectHistorySocket, 5000);
+    });
+  } catch (err) {
+    logBitoConnection('error', `無法建立 BitoPro 訂單歷史 WebSocket：${err.message}`, {
+      code: err.code || null
+    });
+    setStatus('error', '無法建立 WebSocket', err.message);
+  }
+}
+function startBot() {
+  if (running) return { ok: true, message: '程式已在執行' };
+  running = true;
+  setStatus('starting', LIVE_TRADING ? '啟動中：實盤模式' : '啟動中：模擬模式');
+  emit('info', { message: `Bot 啟動，模式=${LIVE_TRADING ? 'LIVE' : 'DRY RUN'}` });
+  backfillTradeHistory().catch(err => emit('warning', { message: `歷史成交補登失敗：${err.message}` }));
+  connectUserTradeSocket();
+  connectHistorySocket();
+  return { ok: true, message: LIVE_TRADING ? '已要求啟動實盤模式' : '已要求啟動模擬模式' };
+}
+function stopBot() {
+  running = false;
+  if (tradeReconnectTimer) clearTimeout(tradeReconnectTimer);
+  tradeReconnectTimer = null;
+  if (tradeWs) { try { tradeWs.close(); } catch {} tradeWs = null; }
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+  if (ws) { try { ws.close(); } catch {} ws = null; }
+  setStatus('stopped', '已停止');
+  emit('info', { message: 'Bot 已停止；停止後不會自動撤銷交易所已有掛單' });
+  return { ok: true, message: '已停止監聽。注意：交易所已存在的掛單仍需另行管理。' };
+}
+
+function dailySummary() {
+  const map = {};
+  const ensureDay = (day) => {
+    if (!day) return null;
+    if (!map[day]) map[day] = {
+      date: day, fills: 0, signals: 0, submitted: 0, failed: 0,
+      estimatedGross: 0, estimatedFees: 0, estimatedNet: 0,
+      feePending: 0, matchedAmount: 0, unmatchedBuyAmount: 0
+    };
+    return map[day];
+  };
+  const eventDay = (e) => taipeiDate(e.exchangeTime || e.time) || String(e.time || '').slice(0, 10);
+
+  // Count strategy events separately. They never contribute to realized profit.
+  for (const e of journal) {
+    const day = eventDay(e);
+    const d = ensureDay(day);
+    if (!d) continue;
+    if (e.category === 'counter_order_signal') {
+      d.signals++;
+      if (['submitted', 'exchange_accepted'].includes(e.result)) d.submitted++;
+      if (e.result === 'failed') d.failed++;
+    }
+  }
+
+  // Prefer actual trade fills over order-level fill summaries so the same execution
+  // is not counted twice when both records exist.
+  const allFillRows = journal.filter(e =>
+    ['filled_trade', 'filled_order'].includes(e.category) &&
+    ['BUY', 'SELL'].includes(String(e.action || '').toUpperCase()) &&
+    Number(e.amount) > 0 && Number(e.price) > 0
+  );
+  const tradeOrderIds = new Set(allFillRows
+    .filter(e => e.category === 'filled_trade' && e.orderId != null)
+    .map(e => `${String(e.pair || '').toLowerCase()}|${String(e.orderId)}`));
+  const orderDedupedRows = allFillRows.filter(e =>
+    !(e.category === 'filled_order' &&
+      tradeOrderIds.has(`${String(e.pair || '').toLowerCase()}|${String(e.orderId || '')}`))
+  );
+
+  // Live WebSocket and REST history can describe the same execution with different IDs.
+  // Deduplicate only near-identical filled_trade rows: same pair, side, price, amount,
+  // fee/currency and exchange timestamp within 1 second. Prefer the row with converted
+  // fee data so the duplicate lacking a historical price does not win.
+  const fillRows = [];
+  const duplicateTimeMs = e => {
+    const iso = toIsoTimestamp(e.exchangeTime || e.time);
+    const ms = Date.parse(iso || '');
+    return Number.isFinite(ms) ? ms : 0;
+  };
+  const duplicateSignatureMatches = (a, b) => {
+    if (a.category !== 'filled_trade' || b.category !== 'filled_trade') return false;
+    if (String(a.pair || '').toLowerCase() !== String(b.pair || '').toLowerCase()) return false;
+    if (String(a.action || '').toUpperCase() !== String(b.action || '').toUpperCase()) return false;
+    if (Math.abs(Number(a.price) - Number(b.price)) > 1e-10) return false;
+    if (Math.abs(Number(a.amount) - Number(b.amount)) > 1e-8) return false;
+    if (Math.abs(Number(a.fee || 0) - Number(b.fee || 0)) > 1e-10) return false;
+    if (String(a.feeCurrency || '').toUpperCase() !== String(b.feeCurrency || '').toUpperCase()) return false;
+    const ta = duplicateTimeMs(a), tb = duplicateTimeMs(b);
+    return ta > 0 && tb > 0 && Math.abs(ta - tb) <= 1000;
+  };
+  const completeness = e =>
+    (e.feeTwdCost != null ? 4 : 0) +
+    (e.feeBitoTwdPrice != null ? 2 : 0) +
+    (e.tradeId && !String(e.tradeId).includes('|') ? 1 : 0);
+  for (const row of orderDedupedRows) {
+    const duplicateIndex = row.category === 'filled_trade'
+      ? fillRows.findIndex(existing => duplicateSignatureMatches(existing, row))
+      : -1;
+    if (duplicateIndex < 0) {
+      fillRows.push(row);
+    } else if (completeness(row) > completeness(fillRows[duplicateIndex])) {
+      fillRows[duplicateIndex] = row;
+    }
+  }
+
+  // Daily "完整成交" counts each exchange order once, even when the exchange
+  // reports that order as several partial filled_trade rows. Fee costs and FIFO P/L
+  // still use every distinct execution row below, so partial-fill fees are not lost.
+  const countedOrderKeys = new Set();
+  for (const e of fillRows) {
+    const day = eventDay(e);
+    const d = ensureDay(day);
+    if (!d) continue;
+    const orderId = e.orderId == null ? '' : String(e.orderId).trim();
+    const orderKey = orderId
+      ? `${day}|${String(e.pair || '').toLowerCase()}|${orderId}`
+      : `${day}|trade|${String(e.tradeId || e.matchID || e.id || '')}`;
+    if (!countedOrderKeys.has(orderKey)) {
+      countedOrderKeys.add(orderKey);
+      d.fills++;
+    }
+    // 手續費以 BITO 支付時，統一換算成台幣後才納入統計。
+    // 優先使用已保存的 feeTwdCost；舊資料若只有 BITO 價格，則即時計算 fee × BITO/TWD。
+    const savedFeeTwd = Number(e.feeTwdCost);
+    const bitoPrice = Number(e.feeBitoTwdPrice);
+    const feeTwd = Number.isFinite(savedFeeTwd) && savedFeeTwd >= 0
+      ? savedFeeTwd
+      : (String(e.feeCurrency || '').toUpperCase() === 'BITO' &&
+         Number(e.fee) > 0 && Number.isFinite(bitoPrice) && bitoPrice > 0
+          ? Number(e.fee) * bitoPrice
+          : null);
+    if (feeTwd != null) {
+      d.estimatedFees += feeTwd;
+    } else if (Number(e.fee) > 0 && String(e.feeCurrency || '').toUpperCase() === 'BITO') {
+      // 歷史 BITO/TWD 價格尚未取得時，標記待補，不拿目前價格冒充成交當時價格。
+      d.feePending++;
+    }
+  }
+
+  // 以策略反向委託的 sourceOrderId -> counter orderId 關係配對。
+  // 不再用全帳戶 FIFO 把不相關／跨策略的 BUY 庫存配給 SELL，避免毛利被放大。
+  // 只有來源訂單與其反向訂單都存在實際成交紀錄時，才計入已完成配對毛利。
+  const orderFills = new Map();
+  for (const e of fillRows) {
+    const pair = String(e.pair || '').toLowerCase();
+    const orderId = e.orderId == null ? '' : String(e.orderId).trim();
+    if (!pair || !orderId) continue;
+    const key = `${pair}|${orderId}`;
+    if (!orderFills.has(key)) orderFills.set(key, []);
+    orderFills.get(key).push(e);
+  }
+
+  const completedPairKeys = new Set();
+  for (const signal of journal) {
+    if (signal.category !== 'counter_order_signal') continue;
+    if (!['exchange_accepted', 'submitted'].includes(signal.result)) continue;
+    const pair = String(signal.pair || '').toLowerCase();
+    const sourceOrderId = signal.sourceOrderId == null ? '' : String(signal.sourceOrderId).trim();
+    const counterOrderId = signal.orderId == null ? '' : String(signal.orderId).trim();
+    if (!pair || !sourceOrderId || !counterOrderId || sourceOrderId === counterOrderId) continue;
+
+    const pairKey = `${pair}|${sourceOrderId}|${counterOrderId}`;
+    if (completedPairKeys.has(pairKey)) continue;
+    completedPairKeys.add(pairKey);
+
+    const sourceRows = orderFills.get(`${pair}|${sourceOrderId}`) || [];
+    const counterRows = orderFills.get(`${pair}|${counterOrderId}`) || [];
+    if (!sourceRows.length || !counterRows.length) continue;
+
+    const summarize = rows => {
+      let amount = 0;
+      let quote = 0;
+      let latestTime = 0;
+      let latestDay = '';
+      for (const row of rows) {
+        const qty = Number(row.amount);
+        const price = Number(row.price);
+        if (!(qty > 0) || !(price > 0)) continue;
+        amount += qty;
+        quote += qty * price;
+        const stamp = Date.parse(toIsoTimestamp(row.exchangeTime || row.time) || '');
+        if (Number.isFinite(stamp) && stamp >= latestTime) {
+          latestTime = stamp;
+          latestDay = eventDay(row);
+        }
+      }
+      return { amount, averagePrice: amount > 0 ? quote / amount : 0, latestTime, latestDay };
+    };
+
+    const source = summarize(sourceRows);
+    const counter = summarize(counterRows);
+    const matched = Math.min(source.amount, counter.amount);
+    if (!(matched > 0) || !(source.averagePrice > 0) || !(counter.averagePrice > 0)) continue;
+
+    // 使用兩邊實際成交的加權平均價差；按反向單完成配對的日期入帳。
+    const completionDay = counter.latestDay || source.latestDay;
+    const d = ensureDay(completionDay);
+    if (!d) continue;
+    d.estimatedGross += Math.abs(source.averagePrice - counter.averagePrice) * matched;
+    d.matchedAmount += matched;
+  }
+
+  // 每日淨利統一採「當日已配對毛利－當日實際成交手續費（BITO 換算台幣）」。
+  // 不在 FIFO 配對時重複扣買入端手續費，避免跨日配對造成每日淨利與手續費欄位對不起來。
+  for (const d of Object.values(map)) {
+    d.estimatedNet = d.estimatedGross - d.estimatedFees;
+  }
+
+  // 未配對庫存不再用 FIFO 方式推算每日策略毛利。
+
+  const rows = Object.values(map).sort((a, b) => b.date.localeCompare(a.date));
+  // Keep a standalone persisted snapshot, regenerated from journal source-of-truth.
+  try {
+    fs.writeFileSync(DAILY_STATS_FILE, JSON.stringify(rows, null, 2), 'utf8');
+  } catch (err) {
+    emit('warning', { message: `儲存每日統計 JSON 失敗：${err.message}` });
+  }
+  return rows;
+}
+
+app.get('/api/market-summary/:pair', async (req, res) => {
+  const pair = String(req.params.pair || '').toLowerCase();
+  if (!validPair(pair) || !PAIRS.includes(pair)) {
+    return res.status(400).json({ ok: false, error: '此交易對不在目前支援清單中，請先到策略價差設定加入。' });
+  }
+  const now = Math.floor(Date.now() / 1000);
+  try {
+    const response = await axios.get(`https://api.bitopro.com/v3/trading-history/${pair}`, {
+      params: { resolution: '1m', from: now - 15 * 60, to: now },
+      timeout: 12000
+    });
+    const root = response.data?.data ?? response.data;
+    const rows = Array.isArray(root) ? root : (Array.isArray(root?.candles) ? root.candles : Array.isArray(root?.data) ? root.data : []);
+    const candles = rows.map(x => ({
+      high: Number(x.high ?? x.h),
+      low: Number(x.low ?? x.l),
+      time: Number(x.timestamp ?? x.time ?? x.t)
+    })).filter(x => Number.isFinite(x.high) && Number.isFinite(x.low) && x.high > 0 && x.low > 0);
+    const high = candles.length ? Math.max(...candles.map(x => x.high)) : null;
+    const low = candles.length ? Math.min(...candles.map(x => x.low)) : null;
+    const tickerResponse = await axios.get(`https://api.bitopro.com/v3/tickers/${pair}`, { timeout: 10000 });
+    const tickerRoot = tickerResponse.data?.data ?? tickerResponse.data;
+    const tickerRows = Array.isArray(tickerRoot) ? tickerRoot : (tickerRoot ? [tickerRoot] : []);
+    const raw = tickerRows.find(x => String(x.pair || '').toLowerCase() === pair) || tickerRows[0] || {};
+    const lastPrice = Number(raw.lastPrice ?? raw.last_price ?? raw.price ?? raw.close ?? raw.last);
+    res.json({ ok: true, pair, intervalMinutes: 15, ticker: {
+      lastPrice: Number.isFinite(lastPrice) && lastPrice > 0 ? lastPrice : null,
+      high, low,
+      rangeDifference: high !== null && low !== null ? high - low : null,
+      candlesCount: candles.length
+    }});
+  } catch (err) {
+    res.status(502).json({ ok: false, error: apiErrorMessage(err) });
+  }
+});
+
+app.get('/api/market/:pair', async (req, res) => {
+  const pair = String(req.params.pair || '').toLowerCase();
+  if (!validPair(pair) || !PAIRS.includes(pair)) {
+    return res.status(400).json({ ok: false, error: '此交易對不在目前支援清單中，請先到策略價差設定加入。' });
+  }
+  const allowed = new Set(['1m','5m','15m','30m','1h','4h','1d']);
+  const resolution = allowed.has(String(req.query.resolution || '1d')) ? String(req.query.resolution || '1d') : '1d';
+  const now = Math.floor(Date.now() / 1000);
+  const rangeSeconds = ({'1m': 2*24*3600, '5m': 7*24*3600, '15m': 14*24*3600, '30m': 30*24*3600, '1h': 90*24*3600, '4h': 180*24*3600, '1d': 365*24*3600})[resolution];
+  const requests = await Promise.allSettled([
+    axios.get(`https://api.bitopro.com/v3/tickers/${pair}`, { timeout: 10000 }),
+    axios.get(`https://api.bitopro.com/v3/order-book/${pair}`, { timeout: 10000 }),
+    axios.get(`https://api.bitopro.com/v3/trades/${pair}`, { timeout: 10000 }),
+    axios.get(`https://api.bitopro.com/v3/trading-history/${pair}`, { params: { resolution, from: now-rangeSeconds, to: now }, timeout: 15000 })
+  ]);
+  const body = requests.map(x => x.status === 'fulfilled' ? (x.value.data?.data ?? x.value.data) : null);
+  const tickerRows = Array.isArray(body[0]) ? body[0] : (body[0] ? [body[0]] : []);
+  // /tickers/{pair} 在部分回應格式中仍可能回傳多個交易對，必須取指定 pair。
+  const rawTicker = tickerRows.find(x => String(x.pair || '').toLowerCase() === pair) || tickerRows[0] || {};
+  const lastPrice = Number(rawTicker.lastPrice ?? rawTicker.last_price ?? rawTicker.price ?? rawTicker.close ?? rawTicker.last);
+  const priceChange24hr = Number(rawTicker.priceChange24hr ?? rawTicker.price_change_24hr);
+  // BitoPro 的 priceChange24hr 是「價格差額」，不是百分比；用 24h 前價格換算百分比。
+  const previousPrice = Number.isFinite(lastPrice) && Number.isFinite(priceChange24hr) ? lastPrice - priceChange24hr : NaN;
+  const changeRate = Number.isFinite(previousPrice) && previousPrice !== 0 ? (priceChange24hr / previousPrice) * 100 : null;
+  const ticker = {
+    lastPrice: Number.isFinite(lastPrice) && lastPrice !== 0 ? lastPrice : null,
+    high: Number(rawTicker.high24hr ?? rawTicker.high_24hr ?? rawTicker.high ?? rawTicker.highPrice) || null,
+    low: Number(rawTicker.low24hr ?? rawTicker.low_24hr ?? rawTicker.low ?? rawTicker.lowPrice) || null,
+    volume: Number(rawTicker.volume24hr ?? rawTicker.volume_24hr ?? rawTicker.volume ?? rawTicker.baseVolume) || null,
+    changeRate: Number.isFinite(changeRate) ? changeRate : null,
+    priceChange24hr: Number.isFinite(priceChange24hr) ? priceChange24hr : null
+  };
+  const bookRoot = body[1] || {};
+  const orderBook = {
+    asks: (bookRoot.asks || bookRoot.ask || []).map(x => ({ price: Number(x.price ?? x[0]), amount: Number(x.amount ?? x.volume ?? x.quantity ?? x[1]) })).filter(x => x.price > 0 && x.amount >= 0).sort((a,b)=>a.price-b.price),
+    bids: (bookRoot.bids || bookRoot.bid || []).map(x => ({ price: Number(x.price ?? x[0]), amount: Number(x.amount ?? x.volume ?? x.quantity ?? x[1]) })).filter(x => x.price > 0 && x.amount >= 0).sort((a,b)=>b.price-a.price)
+  };
+  const tradeRoot = body[2];
+  const tradeRows = Array.isArray(tradeRoot) ? tradeRoot : (Array.isArray(tradeRoot?.trades) ? tradeRoot.trades : Array.isArray(tradeRoot?.data) ? tradeRoot.data : []);
+  const trades = tradeRows.slice(0,50).map(x => ({
+    price: Number(x.price ?? x.matchPrice ?? x.match_price),
+    amount: Number(x.amount ?? x.baseAmount ?? x.base_amount ?? x.volume),
+    action: String(x.action ?? x.side ?? '').toUpperCase(),
+    timestamp: Number(x.timestamp ?? x.createdTimestamp ?? x.created_timestamp ?? x.time) || null
+  })).filter(x => x.price > 0 && x.amount >= 0);
+  const candleRoot = body[3];
+  const candleRows = Array.isArray(candleRoot) ? candleRoot : (Array.isArray(candleRoot?.candles) ? candleRoot.candles : Array.isArray(candleRoot?.data) ? candleRoot.data : []);
+  const candles = candleRows.map(x => {
+    const stamp = Number(x.timestamp ?? x.time ?? x.t);
+    const seconds = stamp > 1e12 ? Math.floor(stamp/1000) : stamp;
+    return { time: seconds, open: Number(x.open ?? x.o), high: Number(x.high ?? x.h), low: Number(x.low ?? x.l), close: Number(x.close ?? x.c), volume: Number(x.volume ?? x.v) || 0 };
+  }).filter(x => x.time > 0 && [x.open,x.high,x.low,x.close].every(Number.isFinite)).sort((a,b)=>a.time-b.time);
+  const failures = requests.map((x,i)=>x.status==='rejected'?['ticker','orderBook','trades','candles'][i]+': '+apiErrorMessage(x.reason):null).filter(Boolean);
+  res.json({ ok: true, pair, resolution, ticker, orderBook, trades, candles, warnings: failures });
+});
+
+app.get('/api/state', (req, res) => res.json({
+  status, running, liveTrading: LIVE_TRADING, credentialsReady: credentialsReady(),
+  balances, assetValuation, events: events.slice(0, 100), daily: dailySummary(),
+  journal: journal.slice(0, 200), spreads: SPREADS, bitoTwdPrice, bitoTwdPriceAt
+}));
+app.get('/api/health', (req, res) => res.json({ ok: true, status: status.state }));
+
+app.delete('/api/journal/:id', (req, res) => {
+  const before = journal.length;
+  journal = journal.filter(entry => String(entry.id || '') !== String(req.params.id));
+  if (journal.length === before) return res.status(404).json({ ok: false, error: '找不到這筆紀錄' });
+  persist();
+  emit('journal', { journal: journal.slice(0, 200), deletedId: req.params.id });
+  res.json({ ok: true, remaining: journal.length });
+});
+app.delete('/api/journal', (req, res) => {
+  const deleted = journal.length;
+  journal = [];
+  persist();
+  emit('journal', { journal: [], cleared: true });
+  res.json({ ok: true, deleted });
+});
+
+app.post('/api/spreads', (req, res) => {
+  const incoming = req.body || {};
+  const next = {};
+  for (const pair of PAIRS) {
+    const value = Number(incoming[pair]);
+    if (!Object.prototype.hasOwnProperty.call(incoming, pair) || !Number.isFinite(value) || value < 0 || value > 1e12) {
+      return res.status(400).json({ ok: false, error: `價差設定無效：${pair.toUpperCase()} 必須是 0 到 1,000,000,000,000 之間的數字` });
+    }
+    next[pair] = value;
+  }
+  SPREADS = next;
+  try { saveSpreads(); } catch (err) { return res.status(500).json({ ok: false, error: `無法儲存價差設定：${err.message}` }); }
+  emit('info', { message: '策略價差設定已更新並儲存' });
+  res.json({ ok: true, spreads: SPREADS, pairs: PAIRS, message: '價差設定已儲存；新訊號會使用新設定，交易所既有掛單不會自動修改。' });
+});
+app.post('/api/pairs', (req, res) => {
+  const pair = String(req.body?.pair || '').trim().toLowerCase().replace('-', '_').replace('/', '_');
+  const action = String(req.body?.action || 'add').toLowerCase();
+  if (!validPair(pair)) return res.status(400).json({ ok: false, error: '交易對格式不正確，請輸入例如 ada_twd 或 btc_usdt（幣種_報價幣）' });
+  if (action === 'add') {
+    if (PAIRS.includes(pair)) return res.status(409).json({ ok: false, error: '這個交易對已經存在' });
+    const spread = Number(req.body?.spread ?? 0);
+    if (!Number.isFinite(spread) || spread < 0 || spread > 1e12) return res.status(400).json({ ok: false, error: '價差必須是 0 到 1,000,000,000,000 之間的數字' });
+    PAIRS.push(pair); SPREADS[pair] = spread;
+  } else if (action === 'remove') {
+    if (!PAIRS.includes(pair)) return res.status(404).json({ ok: false, error: '找不到這個交易對' });
+    if (PAIRS.length <= 1) return res.status(400).json({ ok: false, error: '至少要保留一個交易對' });
+    PAIRS = PAIRS.filter(p => p !== pair); delete SPREADS[pair];
+  } else return res.status(400).json({ ok: false, error: '不支援的操作' });
+  try { savePairs(); saveSpreads(); } catch (err) { return res.status(500).json({ ok: false, error: `儲存交易對失敗：${err.message}` }); }
+  emit('info', { message: action === 'add' ? `已新增交易對 ${pair.toUpperCase()}` : `已移除交易對 ${pair.toUpperCase()}` });
+  res.json({ ok: true, pairs: PAIRS, spreads: SPREADS, message: action === 'add' ? '交易對已新增並儲存。請先確認 BitoPro 支援此交易對。' : '交易對已移除並儲存。既有掛單不會自動取消。' });
+});
+// 真實交易所掛單管理：列表、建立、取消；修改以「取消舊單後建立新單」實作，非交易所原子修改。
+app.get('/api/orders/open', async (req, res) => {
+  if (!requireCredentials(res)) return;
+  const pair = String(req.query.pair || '').trim().toLowerCase();
+  if (pair && !validPair(pair)) return res.status(400).json({ ok: false, error: '交易對格式不正確。' });
+  const authPayload = { identity: EMAIL, nonce: apiTimestamp() };
+  try {
+    const response = await axios.get('https://api.bitopro.com/v3/orders/open', {
+      params: pair ? { pair } : {},
+      headers: signedOrderHeaders(authPayload), timeout: 15000
+    });
+    const data = response.data?.data ?? response.data;
+    res.json({ ok: true, orders: Array.isArray(data) ? data : [] });
+  } catch (err) {
+    res.status(err.response?.status || 502).json({ ok: false, error: apiErrorMessage(err) });
+  }
+});
+app.post('/api/orders', async (req, res) => {
+  if (!requireCredentials(res)) return;
+  const pair = String(req.body?.pair || '').trim().toLowerCase();
+  const action = String(req.body?.action || '').toUpperCase();
+  const price = Number(req.body?.price);
+  const amount = Number(req.body?.amount);
+  const timeInForce = String(req.body?.timeInForce || 'POST_ONLY').toUpperCase();
+  if (!validPair(pair)) return res.status(400).json({ ok: false, error: '交易對格式不正確。' });
+  if (!['BUY', 'SELL'].includes(action)) return res.status(400).json({ ok: false, error: '方向必須是 BUY 或 SELL。' });
+  if (!Number.isFinite(price) || price <= 0) return res.status(400).json({ ok: false, error: '價格必須大於 0。' });
+  if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ ok: false, error: '數量必須大於 0。' });
+  if (!['GTC', 'POST_ONLY'].includes(timeInForce)) return res.status(400).json({ ok: false, error: 'timeInForce 僅支援 GTC 或 POST_ONLY。' });
+  const payload = { action, amount: String(amount), price: String(price), timestamp: apiTimestamp(), type: 'LIMIT', timeInForce };
+  let lastError = null;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const attemptPayload = { ...payload, timestamp: apiTimestamp() };
+    try {
+      const response = await axios.post(`https://api.bitopro.com/v3/orders/${pair}`, attemptPayload, {
+        headers: signedOrderHeaders(attemptPayload, true), timeout: 15000
+      });
+      const result = response.data?.data ?? response.data;
+      const orderId = result?.orderId || result?.id || null;
+      addJournal({ category: 'manual_exchange_order', pair, action, price, amount, orderId, result: 'exchange_accepted', retryCount: attempt - 1, live: true });
+      logOrderConsole('info', `交易所已回應建立手動委託：${pair.toUpperCase()} ${action} ${amount} @ ${price}`, { orderId, attempt, exchangeResponse: result });
+      emit('info', { message: `交易所已回應建立委託：${pair.toUpperCase()} ${action} ${amount} @ ${price}${attempt > 1 ? '（重試成功）' : ''}` });
+      return res.json({ ok: true, order: result, message: '交易所已回應建立委託；請重新整理交易所掛單確認狀態。' });
+    } catch (err) {
+      lastError = err;
+      logOrderConsole('error', `手動委託建立失敗（第 ${attempt}/2 次）`, { pair, action, amount, price, httpStatus: err.response?.status || null, error: apiErrorMessage(err), networkError: !err.response });
+      if (!err.response || attempt >= 2) break;
+      logOrderConsole('warn', '手動委託 0.8 秒後準備重試', { pair, httpStatus: err.response?.status || null });
+      emit('warning', { message: `手動委託第 1 次建立失敗，準備重試：${apiErrorMessage(err)}` });
+      await new Promise(resolve => setTimeout(resolve, 800));
+    }
+  }
+  const message = lastError && !lastError.response
+    ? '連線中斷或逾時，無法確認交易所是否已接受委託；請先刷新掛單，避免重複下單。'
+    : apiErrorMessage(lastError || new Error('未知錯誤'));
+  logOrderConsole('error', '手動建立委託最終失敗', { pair, action, amount, price, httpStatus: lastError?.response?.status || null, error: message });
+  emit('error', { message: `建立委託失敗：${message}` });
+  return res.status(lastError?.response?.status || 502).json({ ok: false, error: message });
+});
+app.delete('/api/orders/:pair/:id', async (req, res) => {
+  if (!requireCredentials(res)) return;
+  const pair = String(req.params.pair || '').toLowerCase();
+  const id = String(req.params.id || '');
+  if (!validPair(pair) || !id || id.length > 100) return res.status(400).json({ ok: false, error: '交易對或訂單 ID 不正確。' });
+  try {
+    const response = await axios.delete(`https://api.bitopro.com/v3/orders/${pair}/${encodeURIComponent(id)}`, {
+      headers: signedOrderHeaders({ identity: EMAIL, nonce: apiTimestamp() }), timeout: 15000
+    });
+    const result = response.data?.data ?? response.data;
+    addJournal({ category: 'manual_exchange_cancel', pair, orderId: id, result: 'cancel_request_accepted', live: true });
+    emit('info', { message: `已送出撤單請求：${pair.toUpperCase()} #${id}` });
+    res.json({ ok: true, result, message: '交易所已回應撤單請求；掛單列表將自動同步更新。' });
+  } catch (err) {
+    emit('error', { message: `撤單失敗：${apiErrorMessage(err)}` });
+    res.status(err.response?.status || 502).json({ ok: false, error: apiErrorMessage(err) });
+  }
+});
+app.put('/api/orders/:pair/:id', async (req, res) => {
+  if (!requireCredentials(res)) return;
+  const pair = String(req.params.pair || '').toLowerCase();
+  const newPair = String(req.body?.newPair || pair).toLowerCase().replace('-', '_').replace('/', '_');
+  const id = String(req.params.id || '');
+  const action = String(req.body?.action || '').toUpperCase();
+  const price = Number(req.body?.price);
+  const amount = Number(req.body?.amount);
+  const timeInForce = String(req.body?.timeInForce || 'POST_ONLY').toUpperCase();
+  if (!validPair(pair) || !validPair(newPair) || !id || id.length > 100) return res.status(400).json({ ok: false, error: '原交易對、新交易對或訂單 ID 不正確。' });
+  if (!['BUY', 'SELL'].includes(action) || !Number.isFinite(price) || price <= 0 || !Number.isFinite(amount) || amount <= 0) return res.status(400).json({ ok: false, error: '方向、價格或數量不正確。' });
+  if (!['GTC', 'POST_ONLY'].includes(timeInForce)) return res.status(400).json({ ok: false, error: 'timeInForce 僅支援 GTC 或 POST_ONLY。' });
+  try {
+    await axios.delete(`https://api.bitopro.com/v3/orders/${pair}/${encodeURIComponent(id)}`, {
+      headers: signedOrderHeaders({ identity: EMAIL, nonce: apiTimestamp() }), timeout: 15000
+    });
+  } catch (err) {
+    return res.status(err.response?.status || 502).json({ ok: false, error: `舊訂單撤銷失敗，未建立新單：${apiErrorMessage(err)}` });
+  }
+  const payload = { action, amount: String(amount), price: String(price), timestamp: apiTimestamp(), type: 'LIMIT', timeInForce };
+  try {
+    const response = await axios.post(`https://api.bitopro.com/v3/orders/${newPair}`, payload, {
+      headers: signedOrderHeaders(payload, true), timeout: 15000
+    });
+    const result = response.data?.data ?? response.data;
+    addJournal({ category: 'manual_exchange_order_edit', pair: newPair, originalPair: pair, action, price, amount, replacedOrderId: id, orderId: result?.orderId || result?.id || null, result: 'cancelled_and_recreated', live: true });
+    emit('info', { message: `訂單已撤銷並重新建立：${newPair.toUpperCase()} ${action} ${amount} @ ${price}` });
+    res.json({ ok: true, order: result, message: `舊單已撤銷，新單已送至 ${newPair.toUpperCase()}。請重新整理確認新單狀態。` });
+  } catch (err) {
+    emit('error', { message: `舊單 ${pair.toUpperCase()} #${id} 已撤銷，但新交易對 ${newPair.toUpperCase()} 建立失敗：${apiErrorMessage(err)}` });
+    res.status(err.response?.status || 502).json({ ok: false, error: `舊單 ${pair.toUpperCase()} #${id} 已撤銷，但新交易對 ${newPair.toUpperCase()} 建立失敗：${apiErrorMessage(err)}` });
+  }
+});
+app.post('/api/start', (req, res) => res.json(startBot()));
+app.post('/api/stop', (req, res) => res.json(stopBot()));
+app.post('/api/balance', async (req, res) => {
+  try { res.json({ ok: true, balances: await getAccountBalance() }); }
+  catch (err) { res.status(400).json({ ok: false, error: err.response?.data || err.message }); }
+});
+app.get('/api/export.csv', (req, res) => {
+  // CSV 僅匯出「每日統計」，不包含成交明細、掛單、餘額或即時事件。
+  const headers = ['日期','完整成交','反向訊號','已送出','失敗','獲利（已配對毛利）','估算手續費','估算淨價差'];
+  const fields = ['date','fills','signals','submitted','failed','estimatedGross','estimatedFees','estimatedNet'];
+  const csvCell = value => `"${String(value == null ? '' : value).replace(/"/g, '""')}"`;
+  const rows = [headers.map(csvCell).join(','), ...dailySummary().map(day => fields.map(k => csvCell(day[k])).join(','))];
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="bito-daily-stats.csv"');
+  res.send('\ufeff' + rows.join('\r\n'));
+});
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Dashboard: http://0.0.0.0:${PORT}`);
+  // 成交紀錄與策略下單分離：服務啟動後自動補登歷史成交並連線成交事件，
+  // 不再要求使用者按「啟動監控」，也不會因此自動啟動反向策略下單。
+  running = true;
+  setStatus('starting', '成交紀錄自動同步中');
+  setTimeout(async () => {
+    await calibrateApiTime();
+    // 定期更新 API 時差；失敗時沿用最近一次成功的校正值。
+    setInterval(() => { calibrateApiTime().catch(() => {}); }, 5 * 60 * 1000).unref?.();
+    backfillTradeHistory().catch(err =>
+      emit('warning', { message: `服務啟動時歷史成交回補失敗：${apiErrorMessage(err)}` })
+    );
+    if (credentialsReady()) { connectUserTradeSocket(); connectHistorySocket(); }
+    else setStatus('needs_config', '請先設定 .env 的 API 認證資料');
+  }, 1200);
+});
+const wss = new WebSocket.Server({ server, path: '/live' });
+wss.on('connection', client => {
+  clients.add(client);
+  client.send(JSON.stringify({ kind: 'snapshot', state: {
+    status, running, liveTrading: LIVE_TRADING, balances, events: events.slice(0, 100),
+    daily: dailySummary(), journal: journal.slice(0, 200), spreads: SPREADS, credentialsReady: credentialsReady(), bitoTwdPrice, bitoTwdPriceAt
+  }}));
+  client.on('close', () => clients.delete(client));
+});
+process.on('SIGINT', () => { stopBot(); server.close(() => process.exit(0)); });
